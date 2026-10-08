@@ -148,6 +148,8 @@ file.
 | `--bialet-bin` | `MASSE_BIALET_BIN` | `bialet` | Bialet binary |
 | `--bialet-docs` | `MASSE_BIALET_DOCS` | auto-detected | Docs directory for `bialet_docs` |
 | `--timeout` | — | `30` | Default external-command timeout (s) |
+| `--request-timeout` | — | `120` | Per-request provider timeout (s) |
+| `--prompt-file` | `MASSE_PROMPT_FILE` | — | Extra initial prompt file appended to the system prompt |
 | `--max-iterations` | — | `24` | Tool iterations per turn |
 | `--temperature` | — | `0.2` | Sampling temperature |
 | `--print-config` | — | — | Print resolved config and exit |
@@ -172,6 +174,38 @@ Run the tests:
 ```bash
 cargo test --workspace
 ```
+
+## What goes into the system prompt
+
+The initial prompt is assembled by `harness-core/src/prompt.rs` at startup:
+
+1. the base instructions (what masse is, how atomic tools work);
+2. a reference list of tool names;
+3. the repository `AGENTS.md`, injected verbatim as repository instructions
+   (user chat messages take priority over it);
+4. the list of discovered skills, if any;
+5. a pointer to the local Bialet/Wren docs, if found;
+6. the contents of `--prompt-file`, when given.
+
+Notably, masse does **not** read any framework's `ai-prompt.md` automatically.
+Bialet's `docs/ai-prompt.md` is only reachable through the `bialet_docs` tool
+when the model calls it. To make a framework prompt part of the system prompt,
+pass it explicitly:
+
+```bash
+masse --prompt-file ../bialet/docs/prompt-guide.md -C myapp
+```
+
+## Long turns and errors
+
+A turn always ends with exactly one terminal event (`TurnFinished` or `Error`),
+so a front end can never get stuck on "thinking". On top of that:
+
+- the provider has a 10 s connect timeout and a configurable request timeout
+  (`--request-timeout`, default 120 s);
+- external commands are killed after their timeout (30 s default);
+- a panic in the agent is caught and reported as an error;
+- in the TUI, **Esc** cancels the in-flight turn, and **Ctrl-C** quits.
 
 ## HTTP API
 

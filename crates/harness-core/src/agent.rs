@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use futures::FutureExt;
 use harness_session::{encode_json_args, Event, SessionStore, Status as SessionStatus};
 use harness_tools::{ToolContext, ToolRegistry, ToolStatus};
 use tokio::sync::{broadcast, mpsc};
@@ -98,8 +99,30 @@ impl Agent {
         self.provider.name()
     }
 
-    /// Run one user turn to completion. Returns the final assistant text.
+    /// Run one user turn to completion.
+    ///
+    /// Exactly one terminal event (`TurnFinished` or `Error`) is emitted on
+    /// every path, so a front end can never get stuck waiting for the agent.
     pub async fn send(
+        &mut self,
+        text: &str,
+        sink: Option<&broadcast::Sender<AgentEvent>>,
+    ) -> Result<String> {
+        let result = self.run_turn(text, sink).await;
+        if let Some(s) = sink {
+            match &result {
+                Ok(_) => {
+                    let _ = s.send(AgentEvent::TurnFinished);
+                }
+                Err(e) => {
+                    let _ = s.send(AgentEvent::Error(e.to_string()));
+                }
+            }
+        }
+        result
+    }
+
+    async fn run_turn(
         &mut self,
         text: &str,
         sink: Option<&broadcast::Sender<AgentEvent>>,
@@ -123,13 +146,7 @@ impl Agent {
                 tools: self.tools.openai_schemas(),
                 temperature: self.config.temperature,
             };
-            let response = match self.provider.complete(request).await {
-                Ok(r) => r,
-                Err(e) => {
-                    emit!(AgentEvent::Error(e.to_string()));
-                    return Err(e);
-                }
-            };
+            let response = self.provider.complete(request).await?;
 
             if !response.content.trim().is_empty() {
                 emit!(AgentEvent::AssistantMessage(response.content.clone()));
@@ -145,7 +162,6 @@ impl Agent {
             ));
 
             if calls.is_empty() {
-                emit!(AgentEvent::TurnFinished);
                 return Ok(response.content);
             }
 
@@ -192,12 +208,10 @@ impl Agent {
             }
         }
 
-        let message = format!(
+        Err(anyhow::anyhow!(
             "agent exceeded {} tool iterations without finishing",
             self.config.max_iterations
-        );
-        emit!(AgentEvent::Error(message.clone()));
-        Err(anyhow::anyhow!(message))
+        ))
     }
 }
 
@@ -235,6 +249,7 @@ pub fn rebuild_messages(events: &[Event], system_prompt: &str) -> Vec<ChatMessag
 /// Commands the actor accepts.
 enum Command {
     User(String),
+    Cancel,
     Shutdown,
 }
 
@@ -257,7 +272,47 @@ impl AgentHandle {
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     Command::User(text) => {
-                        let _ = agent.send(&text, Some(&emitter)).await;
+                        // Guard against panics so the actor never dies silently
+                        // and leaves a front end stuck on "thinking".
+                        let fut = std::panic::AssertUnwindSafe(agent.send(&text, Some(&emitter)))
+                            .catch_unwind();
+                        tokio::pin!(fut);
+                        let mut shutdown = false;
+                        loop {
+                            tokio::select! {
+                                outcome = &mut fut => {
+                                    if outcome.is_err() {
+                                        let _ = emitter.send(AgentEvent::Error(
+                                            "internal error: agent task panicked; turn aborted".into(),
+                                        ));
+                                    }
+                                    break;
+                                }
+                                queued = rx.recv() => {
+                                    match queued {
+                                        Some(Command::Cancel) => {
+                                            // Dropping `fut` cancels the in-flight turn.
+                                            let _ = emitter.send(AgentEvent::Error(
+                                                "turn cancelled".into(),
+                                            ));
+                                            break;
+                                        }
+                                        Some(Command::Shutdown) | None => {
+                                            shutdown = true;
+                                            break;
+                                        }
+                                        // Ignore new messages while busy.
+                                        Some(Command::User(_)) => {}
+                                    }
+                                }
+                            }
+                        }
+                        if shutdown {
+                            break;
+                        }
+                    }
+                    Command::Cancel => {
+                        let _ = emitter.send(AgentEvent::Error("nothing to cancel".into()));
                     }
                     Command::Shutdown => break,
                 }
@@ -269,6 +324,11 @@ impl AgentHandle {
     /// Queue a user message. Returns false if the actor has stopped.
     pub fn send_user(&self, text: impl Into<String>) -> bool {
         self.tx.send(Command::User(text.into())).is_ok()
+    }
+
+    /// Ask the actor to abort the in-flight turn, if any.
+    pub fn cancel(&self) -> bool {
+        self.tx.send(Command::Cancel).is_ok()
     }
 
     /// Subscribe to the event stream. Each subscriber sees every future event.

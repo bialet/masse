@@ -361,9 +361,15 @@ fn handle_key(app: &mut App, handle: &AgentHandle, key: KeyEvent) {
             }
         }
         KeyCode::Esc => {
-            app.input.clear();
-            app.cursor = 0;
-            app.history_cursor = None;
+            if app.running {
+                // Abort an in-flight turn instead of being stuck.
+                handle.cancel();
+                app.status = "cancelling".into();
+            } else {
+                app.input.clear();
+                app.cursor = 0;
+                app.history_cursor = None;
+            }
         }
         _ => {}
     }
@@ -408,7 +414,7 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" message (Enter to send · Ctrl-C to quit) ")
+                .title(" message (Enter to send · Esc cancel · Ctrl-C quit) ")
                 .border_style(Style::default().fg(Color::Blue)),
         )
         .wrap(Wrap { trim: false });

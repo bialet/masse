@@ -634,6 +634,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "futures",
  "harness-session",
  "harness-tools",
  "reqwest",

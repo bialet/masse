@@ -39,6 +39,11 @@ This keeps the conversation single-threaded (no locking around the message
 history) while letting any number of subscribers render it. The TUI and the
 WebSocket each subscribe to the same broadcast channel.
 
+Each turn emits exactly one terminal event (`TurnFinished` or `Error`), the
+provider has connect/request timeouts, and a panic inside the agent is caught
+and surfaced as an error, so a front end never gets stuck. The actor also
+accepts `Cancel`, which drops the in-flight turn (used by the TUI's Esc key).
+
 ### Providers
 
 `harness_core::Provider` is one async method:

@@ -93,6 +93,17 @@ struct Cli {
     #[arg(long, default_value_t = 0.2)]
     temperature: f32,
 
+    /// Per-request provider timeout, in seconds. Prevents a hung endpoint from
+    /// freezing a turn.
+    #[arg(long, default_value_t = 120)]
+    request_timeout: u64,
+
+    /// Extra initial prompt file appended to the system prompt (for example a
+    /// framework's AI prompt such as Bialet's docs/ai-prompt.md). Relative paths
+    /// resolve against the workspace.
+    #[arg(long, env = "MASSE_PROMPT_FILE")]
+    prompt_file: Option<PathBuf>,
+
     /// Print the resolved configuration and exit without starting a front end.
     #[arg(long)]
     print_config: bool,
@@ -149,14 +160,30 @@ async fn run() -> Result<()> {
         }
         Arc::new(MockProvider::new())
     } else {
-        Arc::new(OpenAiProvider::new(
+        Arc::new(OpenAiProvider::with_timeout(
             cli.base_url.clone(),
             cli.api_key.clone().unwrap_or_default(),
             cli.model.clone(),
+            Duration::from_secs(cli.request_timeout),
         ))
     };
 
-    let system_prompt = build_system_prompt(&project);
+    let mut system_prompt = build_system_prompt(&project);
+    if let Some(path) = &cli.prompt_file {
+        let resolved = if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        };
+        let extra = std::fs::read_to_string(&resolved)
+            .with_context(|| format!("cannot read prompt file {}", resolved.display()))?;
+        system_prompt.push_str(&format!(
+            "\n\n# Project-supplied initial prompt ({})\n\n",
+            resolved.display()
+        ));
+        system_prompt.push_str(extra.trim());
+        system_prompt.push('\n');
+    }
     let config = AgentConfig {
         model: cli.model.clone(),
         temperature: cli.temperature,
@@ -246,6 +273,11 @@ fn print_config(
     );
     println!("base url       : {}", cli.base_url);
     println!("model          : {}", cli.model);
+    println!("request timeout: {}s", cli.request_timeout);
+    match &cli.prompt_file {
+        Some(p) => println!("prompt file    : {}", p.display()),
+        None => println!("prompt file    : (none)"),
+    }
     println!("bialet binary  : {}", cli.bialet_bin);
     match &project.docs_dir {
         Some(d) => println!("bialet docs    : {}", d.display()),

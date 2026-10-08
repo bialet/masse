@@ -57,8 +57,20 @@ impl OpenAiProvider {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        Self::with_timeout(base_url, api_key, model, Duration::from_secs(120))
+    }
+
+    /// Build a provider with an explicit per-request timeout. A short connect
+    /// timeout keeps an unreachable endpoint from hanging a turn for minutes.
+    pub fn with_timeout(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        request_timeout: Duration,
+    ) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(300))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(request_timeout)
             .build()
             .unwrap_or_default();
         OpenAiProvider {

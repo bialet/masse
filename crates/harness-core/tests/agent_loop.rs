@@ -4,11 +4,15 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use harness_core::{Agent, AgentConfig, ChatRequest, ChatResponse, Provider};
+use harness_core::{
+    Agent, AgentConfig, AgentEvent, AgentHandle, ChatRequest, ChatResponse, Provider,
+};
 use harness_session::SessionStore;
 use harness_tools::{builtin_registry, ToolContext};
+use tokio::sync::broadcast;
 
 struct ScriptedProvider {
     responses: Mutex<VecDeque<ChatResponse>>,
@@ -104,6 +108,117 @@ async fn path_escape_is_rejected() {
     let ctx = ToolContext::new(&root);
     assert!(ctx.resolve("../../etc/passwd").is_err());
     assert!(ctx.resolve("sub/dir/file.txt").is_ok());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A provider that fails immediately.
+struct FailingProvider;
+
+#[async_trait]
+impl Provider for FailingProvider {
+    fn name(&self) -> &str {
+        "failing"
+    }
+    async fn complete(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        anyhow::bail!("boom")
+    }
+}
+
+/// A provider that never answers.
+struct HangingProvider;
+
+#[async_trait]
+impl Provider for HangingProvider {
+    fn name(&self) -> &str {
+        "hanging"
+    }
+    async fn complete(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        unreachable!()
+    }
+}
+
+async fn build_agent(provider: Arc<dyn Provider>, root: &std::path::Path) -> Agent {
+    Agent::new(
+        provider,
+        Arc::new(builtin_registry()),
+        ToolContext::new(root),
+        Arc::new(SessionStore::new(root.join("session.csv"))),
+        AgentConfig {
+            model: "test".into(),
+            system_prompt: "test".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn provider_error_always_emits_a_terminal_event() {
+    let root = std::env::temp_dir().join(format!("masse-err-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut agent = build_agent(Arc::new(FailingProvider), &root).await;
+    let (tx, mut rx) = broadcast::channel(16);
+    let result = agent.send("hi", Some(&tx)).await;
+    assert!(result.is_err());
+
+    let mut saw_error = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::Error(_)) {
+            saw_error = true;
+        }
+    }
+    assert!(
+        saw_error,
+        "an Error event must be emitted on provider failure"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn cancel_aborts_a_hanging_turn() {
+    let root = std::env::temp_dir().join(format!("masse-cancel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let agent = build_agent(Arc::new(HangingProvider), &root).await;
+    let handle = AgentHandle::spawn(agent);
+    let mut rx = handle.subscribe();
+
+    assert!(handle.send_user("hi"));
+
+    let started = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(event) = rx.recv().await {
+            if matches!(event, AgentEvent::UserMessage(_)) {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(started, "turn should have started");
+
+    handle.cancel();
+    let cancelled = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Ok(event) = rx.recv().await {
+            if let AgentEvent::Error(message) = event {
+                if message.contains("cancel") {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+    .await
+    .unwrap_or(false);
+    assert!(cancelled, "cancel must produce an Error event");
+    handle.shutdown();
 
     let _ = std::fs::remove_dir_all(&root);
 }

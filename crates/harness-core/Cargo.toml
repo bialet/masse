@@ -16,3 +16,4 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+futures = { workspace = true }
