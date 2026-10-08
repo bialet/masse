@@ -54,6 +54,10 @@ which sets a `Terminate` flag on its `ToolResult`; the agent stops and emits
 `AgentEvent::Finished`. If the model just stops, the agent emits
 `TurnFinished` instead.
 
+A task in `harness-cli` also subscribes to the same broadcast and appends every
+event (including errors and retries) to `.masse/masse.log`, a durable
+human-readable log; the server exposes it at `GET /api/log`.
+
 ### Providers
 
 `harness_core::Provider` is one async method:

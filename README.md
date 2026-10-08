@@ -228,6 +228,9 @@ or `Error`), so a front end can never get stuck on "thinking". On top of that:
   (default 120 s);
 - external commands are killed after their timeout (30 s default);
 - a panic in the agent is caught and reported as an error;
+- **every event — including errors and retries — is appended to
+  `.masse/masse.log`**, a human-readable runtime log, so there is always a
+  place to see what failed. The server also exposes it at `GET /api/log`;
 - in the TUI, **Esc** cancels the in-flight turn, and **Ctrl-C** quits.
 
 ### Knowing when the task is finished
@@ -253,7 +256,8 @@ without calling `finish`.
 | `/` | GET | Minimal chat UI (WebSocket-backed) |
 | `/api/health` | GET | Provider, model, tool count, root |
 | `/api/tools` | GET | Registered tools |
-| `/api/session` | GET | Parsed session events |
+| `/api/session` | GET | Parsed session events (and a `finished` flag) |
+| `/api/log` | GET | Tail of `.masse/masse.log` (`?lines=N`) |
 | `/api/message` | POST | `{ "text": "…" }` queues a user turn |
 | `/ws` | GET | WebSocket: replays history, streams events |
 

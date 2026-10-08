@@ -51,6 +51,11 @@ Bialet essentials (always follow, even without the full guide below):
 - `Request.post(name)` returns null when the key is missing. ALWAYS use
   `|| ""` or a null check before any string operation — this is the number one
   crash cause in Bialet apps.
+- `Session` is instance-based: create one with `Session.new()`, then call
+  `session.set(key, value)` / `session.get(key)` and use `session.csrf` /
+  `session.csrfOk`. Only `Session.id`, `Session.name` and `Session.destroy()`
+  are static. `Session.get` returns null for a missing key, so guard it exactly
+  like `Request.post`.
 - Migrations live in `_migration.wren` (or `_app/migration.wren`), cron in
   `_cron.wren`, the layout in `_app.wren` / `_app/template.wren`. Files starting
   with `_` or `.` are private and never served.

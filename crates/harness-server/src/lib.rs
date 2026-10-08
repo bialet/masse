@@ -6,11 +6,12 @@
 //! followed from the other.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -30,6 +31,8 @@ pub struct AppState {
     pub provider_name: String,
     pub model: String,
     pub root: String,
+    /// Path to the human-readable runtime log, if logging is enabled.
+    pub log_path: Option<PathBuf>,
 }
 
 /// Bind `addr` and serve until the process is stopped.
@@ -39,6 +42,7 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
         .route("/api/health", get(health))
         .route("/api/tools", get(list_tools))
         .route("/api/session", get(session_events))
+        .route("/api/log", get(log_tail))
         .route("/api/message", post(post_message))
         .route("/ws", get(ws_handler))
         .with_state(state);
@@ -100,6 +104,31 @@ async fn session_events(State(state): State<AppState>) -> Json<JsonValue> {
         "session": state.session.path().display().to_string(),
         "finished": finished,
         "events": events.iter().map(session_event_json).collect::<Vec<_>>(),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct LogQuery {
+    lines: Option<usize>,
+}
+
+/// Tail the human-readable runtime log (`.masse/masse.log`), where errors and
+/// retries are recorded.
+async fn log_tail(State(state): State<AppState>, Query(q): Query<LogQuery>) -> Json<JsonValue> {
+    let Some(path) = &state.log_path else {
+        return Json(json!({ "error": "no runtime log configured" }));
+    };
+    let content = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let n = q.lines.unwrap_or(400).max(1);
+    let lines: Vec<&str> = content.lines().collect();
+    let log = if lines.len() > n {
+        lines[lines.len() - n..].join("\n")
+    } else {
+        content
+    };
+    Json(json!({
+        "path": path.display().to_string(),
+        "log": log,
     }))
 }
 

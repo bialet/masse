@@ -13,13 +13,15 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use harness_core::{
-    build_system_prompt, Agent, AgentConfig, AgentHandle, MockProvider, OpenAiProvider,
+    build_system_prompt, Agent, AgentConfig, AgentEvent, AgentHandle, MockProvider, OpenAiProvider,
     ProjectContext, Provider,
 };
 use harness_server::AppState;
 use harness_session::SessionStore;
 use harness_tools::skill_tools::SkillTool;
 use harness_tools::{builtin_registry, ToolContext};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -151,6 +153,10 @@ async fn run() -> Result<()> {
         eprintln!("[masse] warning: could not update .gitignore: {e}");
     }
 
+    // Human-readable runtime log: this is where errors and retries are written,
+    // so there is always a place to see what the agent ran into.
+    let runtime_log = root.join(".masse").join("masse.log");
+
     // Tools: built-ins plus one tool per discovered skill.
     let mut registry = builtin_registry();
     for skill in &project.skills {
@@ -211,7 +217,14 @@ async fn run() -> Result<()> {
     let registry = Arc::new(registry);
 
     if cli.print_config {
-        print_config(&cli, &root, &session_path, &project, &tool_names);
+        print_config(
+            &cli,
+            &root,
+            &session_path,
+            &runtime_log,
+            &project,
+            &tool_names,
+        );
         return Ok(());
     }
 
@@ -226,13 +239,17 @@ async fn run() -> Result<()> {
     .context("initializing agent")?;
     let handle = AgentHandle::spawn(agent);
 
+    // Subscribe a durable logger to every event, independent of the front end.
+    spawn_event_logger(handle.subscribe(), runtime_log.clone());
+
     let result = if !cli.serve {
         eprintln!(
-            "[masse] TUI · provider={} model={} tools={} session={}",
+            "[masse] TUI · provider={} model={} tools={} session={} log={}",
             provider.name(),
             cli.model,
             tool_names.len(),
-            session_path.display()
+            session_path.display(),
+            runtime_log.display()
         );
         let tui_config = harness_tui::TuiConfig {
             provider_name: provider.name().to_string(),
@@ -247,6 +264,14 @@ async fn run() -> Result<()> {
         let addr: SocketAddr = format!("{}:{}", cli.host, cli.port)
             .parse()
             .with_context(|| format!("invalid bind address {}:{}", cli.host, cli.port))?;
+        eprintln!(
+            "[masse] server · provider={} model={} tools={} session={} log={}",
+            provider.name(),
+            cli.model,
+            tool_names.len(),
+            session_path.display(),
+            runtime_log.display()
+        );
         let state = AppState {
             handle: handle.clone(),
             session: session.clone(),
@@ -254,6 +279,7 @@ async fn run() -> Result<()> {
             provider_name: provider.name().to_string(),
             model: cli.model.clone(),
             root: root.display().to_string(),
+            log_path: Some(runtime_log.clone()),
         };
         harness_server::serve(state, addr).await
     };
@@ -268,11 +294,13 @@ fn print_config(
     cli: &Cli,
     root: &std::path::Path,
     session_path: &std::path::Path,
+    runtime_log: &std::path::Path,
     project: &ProjectContext,
     tool_names: &[String],
 ) {
     println!("workspace      : {}", root.display());
     println!("session        : {}", session_path.display());
+    println!("runtime log    : {}", runtime_log.display());
     let front = if cli.serve { "serve" } else { "tui" };
     println!("front end      : {front}");
     if cli.serve {
@@ -318,5 +346,68 @@ fn print_config(
     println!("tools ({}):", tool_names.len());
     for name in tool_names {
         println!("  - {name}");
+    }
+}
+
+/// Append every agent event to a human-readable runtime log, independently of
+/// the front end. This is where provider errors and retries are recorded, so
+/// there is always somewhere to look when a turn fails.
+fn spawn_event_logger(mut rx: broadcast::Receiver<AgentEvent>, path: PathBuf) {
+    tokio::spawn(async move {
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let line = format_event(&event);
+                    if append_line(&path, &line).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+async fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await?;
+    file.write_all(line.as_bytes()).await?;
+    file.flush().await
+}
+
+fn format_event(event: &AgentEvent) -> String {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    match event {
+        AgentEvent::UserMessage(text) => format!("{ts} USER       {text}\n"),
+        AgentEvent::AssistantMessage(text) => format!("{ts} ASSISTANT  {text}\n"),
+        AgentEvent::ToolCall { name, args } => format!("{ts} TOOL_CALL  {name} {args}\n"),
+        AgentEvent::ToolResult {
+            name,
+            status,
+            output,
+            exit_code,
+        } => format!(
+            "{ts} TOOL_RESULT [{status}] {name} exit={}\n{output}\n",
+            exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "-".into())
+        ),
+        AgentEvent::Retrying {
+            attempt,
+            max,
+            reason,
+        } => format!("{ts} RETRY      {attempt}/{max}: {reason}\n"),
+        AgentEvent::Finished { summary, success } => {
+            format!("{ts} FINISHED   success={success}: {summary}\n")
+        }
+        AgentEvent::Error(message) => format!("{ts} ERROR      {message}\n"),
+        AgentEvent::TurnFinished => format!("{ts} TURN_FINISHED\n"),
     }
 }
