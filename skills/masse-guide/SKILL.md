@@ -35,6 +35,7 @@ SQLite: `sqlite_query`, `sqlite_execute`.
 Bialet: `bialet_run`, `bialet_validate`, `bialet_test`, `bialet_server_start`,
 `bialet_server_stop`, `bialet_log_read`, `bialet_docs`.
 Web: `curl`.
+Control: `finish` — call it to declare the task done (stops the turn).
 
 There is no generic shell tool: every tool is atomic and external binaries are
 invoked with argument arrays.

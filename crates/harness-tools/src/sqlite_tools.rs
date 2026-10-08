@@ -74,6 +74,7 @@ impl Tool for SqliteQuery {
                 stdout
             },
             exit_code: out.exit_code,
+            terminate: None,
         }
     }
 }
@@ -131,6 +132,7 @@ impl Tool for SqliteExecute {
                 status: crate::tool::ToolStatus::Ok,
                 output: text,
                 exit_code: out.exit_code,
+                terminate: None,
             }
         } else {
             ToolResult::from_cmd(&out)

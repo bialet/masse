@@ -31,6 +31,15 @@ impl ToolStatus {
     }
 }
 
+/// A tool's request to end the current turn (used by the `finish` tool).
+#[derive(Clone, Debug)]
+pub struct Terminate {
+    /// Whether the task succeeded.
+    pub success: bool,
+    /// One-line summary of the outcome.
+    pub summary: String,
+}
+
 /// What a tool returns to the agent and to the session log.
 #[derive(Clone, Debug)]
 pub struct ToolResult {
@@ -39,6 +48,8 @@ pub struct ToolResult {
     pub output: String,
     /// Process exit code when the tool ran an external binary.
     pub exit_code: Option<i32>,
+    /// When set, the agent stops the turn after recording this result.
+    pub terminate: Option<Terminate>,
 }
 
 impl ToolResult {
@@ -47,6 +58,7 @@ impl ToolResult {
             status: ToolStatus::Ok,
             output: output.into(),
             exit_code: None,
+            terminate: None,
         }
     }
 
@@ -55,6 +67,25 @@ impl ToolResult {
             status: ToolStatus::Error,
             output: output.into(),
             exit_code: None,
+            terminate: None,
+        }
+    }
+
+    /// Ask the agent to end the turn with a success/failure summary.
+    pub fn finish(output: impl Into<String>, success: bool) -> Self {
+        let output = output.into();
+        ToolResult {
+            status: if success {
+                ToolStatus::Ok
+            } else {
+                ToolStatus::Error
+            },
+            output: output.clone(),
+            exit_code: None,
+            terminate: Some(Terminate {
+                success,
+                summary: output,
+            }),
         }
     }
 
@@ -73,6 +104,7 @@ impl ToolResult {
             status,
             output: cmd.to_agent_text(),
             exit_code: cmd.exit_code,
+            terminate: None,
         }
     }
 }

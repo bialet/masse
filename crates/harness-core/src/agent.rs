@@ -1,6 +1,7 @@
 //! The agent runtime: the tool-calling loop and the actor that owns it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use futures::FutureExt;
@@ -17,6 +18,10 @@ pub struct AgentConfig {
     pub model: String,
     pub temperature: f32,
     pub max_iterations: usize,
+    /// How many times a transient provider error is retried per model call.
+    pub max_retries: usize,
+    /// Base delay for the retry backoff, in milliseconds.
+    pub retry_delay_ms: u64,
     pub system_prompt: String,
 }
 
@@ -26,7 +31,32 @@ impl Default for AgentConfig {
             model: String::new(),
             temperature: 0.2,
             max_iterations: 24,
+            max_retries: 3,
+            retry_delay_ms: 800,
             system_prompt: String::new(),
+        }
+    }
+}
+
+/// Exponential backoff, capped so a turn never stalls for long.
+fn retry_delay(base_ms: u64, attempt: u32) -> u64 {
+    let factor = 1u64 << attempt.saturating_sub(1).min(6);
+    base_ms.saturating_mul(factor).min(15_000)
+}
+
+/// How a turn ended.
+enum TurnOutcome {
+    /// The model stopped calling tools on its own.
+    Stopped(String),
+    /// The `finish` tool was called.
+    Finished { summary: String, success: bool },
+}
+
+impl TurnOutcome {
+    fn text(&self) -> &str {
+        match self {
+            TurnOutcome::Stopped(text) => text,
+            TurnOutcome::Finished { summary, .. } => summary,
         }
     }
 }
@@ -46,7 +76,19 @@ pub enum AgentEvent {
         output: String,
         exit_code: Option<i32>,
     },
+    /// A transient provider error is being retried.
+    Retrying {
+        attempt: u32,
+        max: u32,
+        reason: String,
+    },
+    /// The agent declared the task finished via the `finish` tool.
+    Finished {
+        summary: String,
+        success: bool,
+    },
     Error(String),
+    /// The model stopped on its own without calling `finish`.
     TurnFinished,
 }
 
@@ -101,8 +143,8 @@ impl Agent {
 
     /// Run one user turn to completion.
     ///
-    /// Exactly one terminal event (`TurnFinished` or `Error`) is emitted on
-    /// every path, so a front end can never get stuck waiting for the agent.
+    /// Exactly one terminal event (`Finished`, `TurnFinished` or `Error`) is
+    /// emitted on every path, so a front end can never get stuck waiting.
     pub async fn send(
         &mut self,
         text: &str,
@@ -111,22 +153,28 @@ impl Agent {
         let result = self.run_turn(text, sink).await;
         if let Some(s) = sink {
             match &result {
-                Ok(_) => {
+                Ok(TurnOutcome::Stopped(_)) => {
                     let _ = s.send(AgentEvent::TurnFinished);
+                }
+                Ok(TurnOutcome::Finished { summary, success }) => {
+                    let _ = s.send(AgentEvent::Finished {
+                        summary: summary.clone(),
+                        success: *success,
+                    });
                 }
                 Err(e) => {
                     let _ = s.send(AgentEvent::Error(e.to_string()));
                 }
             }
         }
-        result
+        result.map(|outcome| outcome.text().to_string())
     }
 
     async fn run_turn(
         &mut self,
         text: &str,
         sink: Option<&broadcast::Sender<AgentEvent>>,
-    ) -> Result<String> {
+    ) -> Result<TurnOutcome> {
         macro_rules! emit {
             ($ev:expr) => {
                 if let Some(s) = sink {
@@ -146,7 +194,29 @@ impl Agent {
                 tools: self.tools.openai_schemas(),
                 temperature: self.config.temperature,
             };
-            let response = self.provider.complete(request).await?;
+            // Retry only transient errors, a bounded number of times; a
+            // permanent error (bad request, auth, malformed response) fails
+            // immediately.
+            let mut attempt: u32 = 0;
+            let response = loop {
+                match self.provider.complete(request.clone()).await {
+                    Ok(response) => break response,
+                    Err(e) => {
+                        if e.is_retryable() && attempt < self.config.max_retries as u32 {
+                            attempt += 1;
+                            let delay = retry_delay(self.config.retry_delay_ms, attempt);
+                            emit!(AgentEvent::Retrying {
+                                attempt,
+                                max: self.config.max_retries as u32,
+                                reason: e.to_string(),
+                            });
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
+                            continue;
+                        }
+                        return Err(anyhow::anyhow!(e.to_string()));
+                    }
+                }
+            };
 
             if !response.content.trim().is_empty() {
                 emit!(AgentEvent::AssistantMessage(response.content.clone()));
@@ -162,7 +232,7 @@ impl Agent {
             ));
 
             if calls.is_empty() {
-                return Ok(response.content);
+                return Ok(TurnOutcome::Stopped(response.content));
             }
 
             for call in calls {
@@ -179,6 +249,7 @@ impl Agent {
                     .await?;
 
                 let result = self.tools.call(&call.name, &self.ctx, args_value).await;
+                let terminate = result.terminate.clone();
                 let session_status = if result.status == ToolStatus::Ok {
                     SessionStatus::Ok
                 } else {
@@ -205,6 +276,14 @@ impl Agent {
                     call.name.clone(),
                     result.output,
                 ));
+
+                // The `finish` tool ends the turn with an explicit outcome.
+                if let Some(t) = terminate {
+                    return Ok(TurnOutcome::Finished {
+                        summary: t.summary,
+                        success: t.success,
+                    });
+                }
             }
         }
 

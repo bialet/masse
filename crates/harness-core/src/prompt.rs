@@ -36,6 +36,9 @@ How to work:
   preview and debug, and `bialet_docs` for anything you are unsure about.
 - Keep the user informed with short, concrete messages about what you are doing.
 - When the request is ambiguous, ask instead of guessing.
+- When the user's request is fully satisfied, call the `finish` tool with a
+  short summary. That is the explicit "I am done" signal; do not just go quiet
+  while steps remain.
 
 Bialet essentials (always follow, even without the full guide below):
 - Bialet apps are classic multi-page, server-rendered apps, not SPAs. A file's
@@ -63,6 +66,7 @@ const PROMPT_TOOL_REFERENCE: &str = r#"Tool reference (names only — full schem
 - Bialet: bialet_run, bialet_validate, bialet_test, bialet_server_start,
   bialet_server_stop, bialet_log_read, bialet_docs
 - Web: curl
+- Control: finish (call it to declare the task done)
 - Skills: any tool whose name matches a skill discovered in skills/"#;
 
 /// Build the full system prompt: role, tools, Bialet guide, then project context.

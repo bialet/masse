@@ -90,8 +90,15 @@ async fn list_tools(State(state): State<AppState>) -> Json<JsonValue> {
 
 async fn session_events(State(state): State<AppState>) -> Json<JsonValue> {
     let events = state.session.read_all().await.unwrap_or_default();
+    // The most recent `finish` tool result tells whether the task completed.
+    let finished = events
+        .iter()
+        .rev()
+        .find(|e| e.event_type == "tool_result" && e.tool == "finish")
+        .map(|e| e.status == "ok");
     Json(json!({
         "session": state.session.path().display().to_string(),
+        "finished": finished,
         "events": events.iter().map(session_event_json).collect::<Vec<_>>(),
     }))
 }
@@ -227,6 +234,21 @@ fn agent_event_json(ev: &AgentEvent) -> JsonValue {
             "output": output,
             "exit_code": exit_code,
         }),
+        AgentEvent::Retrying {
+            attempt,
+            max,
+            reason,
+        } => json!({
+            "kind": "retrying",
+            "attempt": attempt,
+            "max": max,
+            "reason": reason,
+        }),
+        AgentEvent::Finished { summary, success } => json!({
+            "kind": "finished",
+            "summary": summary,
+            "success": success,
+        }),
         AgentEvent::Error(message) => json!({ "kind": "error", "message": message }),
         AgentEvent::TurnFinished => json!({ "kind": "turn_finished" }),
     }
@@ -299,6 +321,8 @@ function connect() {
       if (ev.kind === 'assistant_message') append('assistant', 'masse: ' + ev.text);
       else if (ev.kind === 'tool_call') append('tool', '  ⚙ ' + ev.name + ' ' + ev.args);
       else if (ev.kind === 'tool_result') append('result', '  ' + (ev.status === 'ok' ? '✔' : '✘') + ' ' + ev.name + '\n' + ev.output);
+      else if (ev.kind === 'retrying') append('tool', '  ↻ retry ' + ev.attempt + '/' + ev.max + ' (' + ev.reason + ')');
+      else if (ev.kind === 'finished') append(ev.success ? 'assistant' : 'error', (ev.success ? '✔ finished: ' : '✘ failed: ') + ev.summary);
       else if (ev.kind === 'error') append('error', 'error: ' + ev.message);
     }
   };

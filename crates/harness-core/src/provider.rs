@@ -6,11 +6,30 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value as Json};
 
 use crate::message::{ChatMessage, ToolCall};
+
+/// Provider failure, classified so the agent knows whether a retry can help.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum ProviderError {
+    /// Transient: timeouts, connection drops, HTTP 429/5xx. Worth retrying.
+    #[error("{0}")]
+    Retryable(String),
+    /// Permanent: bad request, auth failure, malformed response. Do not retry.
+    #[error("{0}")]
+    Permanent(String),
+}
+
+impl ProviderError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, ProviderError::Retryable(_))
+    }
+}
+
+/// Result of a provider call.
+pub type ProviderResult<T> = std::result::Result<T, ProviderError>;
 
 /// A single completion request.
 #[derive(Clone, Debug, Default)]
@@ -40,7 +59,7 @@ impl ChatResponse {
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
-    async fn complete(&self, request: ChatRequest) -> Result<ChatResponse>;
+    async fn complete(&self, request: ChatRequest) -> ProviderResult<ChatResponse>;
 }
 
 /// An OpenAI-compatible HTTP provider.
@@ -96,7 +115,7 @@ impl Provider for OpenAiProvider {
         "openai-compatible"
     }
 
-    async fn complete(&self, request: ChatRequest) -> Result<ChatResponse> {
+    async fn complete(&self, request: ChatRequest) -> ProviderResult<ChatResponse> {
         let messages: Vec<Json> = request.messages.iter().map(|m| m.to_openai()).collect();
         let mut body = json!({
             "model": if request.model.is_empty() { self.model.clone() } else { request.model },
@@ -108,30 +127,51 @@ impl Provider for OpenAiProvider {
             body["tool_choice"] = Json::String("auto".into());
         }
 
-        let response = self
+        let response = match self
             .client
             .post(self.endpoint())
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()
             .await
-            .context("sending completion request")?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Network failures (timeout, refused, reset) are transient; a
+                // construction error is not.
+                let msg = format!("request to {} failed: {e}", self.endpoint());
+                return Err(if e.is_builder() {
+                    ProviderError::Permanent(msg)
+                } else {
+                    ProviderError::Retryable(msg)
+                });
+            }
+        };
 
         let status = response.status();
-        let text = response
-            .text()
-            .await
-            .context("reading completion response")?;
+        let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow!("provider returned HTTP {status}: {text}"));
+            let retryable = status.as_u16() == 429 || status.is_server_error();
+            let msg = format!("provider returned HTTP {status}: {text}");
+            return Err(if retryable {
+                ProviderError::Retryable(msg)
+            } else {
+                ProviderError::Permanent(msg)
+            });
         }
 
-        let parsed: Json = serde_json::from_str(&text).context("provider returned invalid JSON")?;
+        let parsed: Json = serde_json::from_str(&text).map_err(|e| {
+            ProviderError::Permanent(format!("provider returned invalid JSON: {e}: {text}"))
+        })?;
         let message = parsed
             .get("choices")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("message"))
-            .ok_or_else(|| anyhow!("provider response missing choices[0].message: {text}"))?;
+            .ok_or_else(|| {
+                ProviderError::Permanent(format!(
+                    "provider response missing choices[0].message: {text}"
+                ))
+            })?;
 
         let content = match message.get("content") {
             Some(Json::String(s)) => s.clone(),
@@ -215,7 +255,7 @@ impl Provider for MockProvider {
         "mock"
     }
 
-    async fn complete(&self, request: ChatRequest) -> Result<ChatResponse> {
+    async fn complete(&self, request: ChatRequest) -> ProviderResult<ChatResponse> {
         let _ = self.model;
         // If the last message is a tool result, acknowledge it instead of looping.
         if let Some(last) = request.messages.last() {

@@ -13,6 +13,7 @@
 
 pub mod bialet_tools;
 pub mod cli;
+pub mod control_tools;
 pub mod curl_tools;
 pub mod fs_tools;
 pub mod git_tools;
@@ -63,6 +64,8 @@ pub fn builtin_registry() -> ToolRegistry {
     reg.register(std::sync::Arc::new(bialet_tools::BialetDocs));
     // Web
     reg.register(std::sync::Arc::new(curl_tools::Curl));
+    // Control
+    reg.register(std::sync::Arc::new(control_tools::Finish));
 
     reg
 }

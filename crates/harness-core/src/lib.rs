@@ -13,4 +13,7 @@ pub use context::ProjectContext;
 pub use error::{CoreError, Result};
 pub use message::{ChatMessage, Role, ToolCall};
 pub use prompt::build_system_prompt;
-pub use provider::{ChatRequest, ChatResponse, MockProvider, OpenAiProvider, Provider};
+pub use provider::{
+    ChatRequest, ChatResponse, MockProvider, OpenAiProvider, Provider, ProviderError,
+    ProviderResult,
+};

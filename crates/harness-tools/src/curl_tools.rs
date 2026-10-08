@@ -84,6 +84,7 @@ impl Tool for Curl {
                 stdout
             },
             exit_code: out.exit_code,
+            terminate: None,
         }
     }
 }

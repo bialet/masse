@@ -179,6 +179,24 @@ impl App {
                 );
                 self.push_line(Span::styled(header, Style::default().fg(color)), &output);
             }
+            AgentEvent::Retrying {
+                attempt,
+                max,
+                reason,
+            } => {
+                self.push_plain(format!("↻ retry {attempt}/{max}: {reason}"), Color::Yellow);
+                self.status = format!("retrying {attempt}/{max}");
+            }
+            AgentEvent::Finished { summary, success } => {
+                let (mark, color, status) = if success {
+                    ("✔", Color::Green, "done")
+                } else {
+                    ("✘", Color::Red, "failed")
+                };
+                self.push_plain(format!("{mark} finished: {summary}"), color);
+                self.status = status.into();
+                self.running = false;
+            }
             AgentEvent::Error(message) => {
                 self.push_plain(format!("error: {message}"), Color::Red);
                 self.status = "error".into();

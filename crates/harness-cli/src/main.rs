@@ -93,6 +93,14 @@ struct Cli {
     #[arg(long, default_value_t = 0.2)]
     temperature: f32,
 
+    /// Retries per model call for transient provider errors (0 disables).
+    #[arg(long, default_value_t = 3)]
+    max_retries: usize,
+
+    /// Base delay for the retry backoff, in milliseconds.
+    #[arg(long, default_value_t = 800)]
+    retry_delay_ms: u64,
+
     /// Per-request provider timeout, in seconds. Prevents a hung endpoint from
     /// freezing a turn.
     #[arg(long, default_value_t = 120)]
@@ -193,6 +201,8 @@ async fn run() -> Result<()> {
         model: cli.model.clone(),
         temperature: cli.temperature,
         max_iterations: cli.max_iterations,
+        max_retries: cli.max_retries,
+        retry_delay_ms: cli.retry_delay_ms,
         system_prompt,
     };
 
@@ -279,6 +289,10 @@ fn print_config(
     println!("base url       : {}", cli.base_url);
     println!("model          : {}", cli.model);
     println!("request timeout: {}s", cli.request_timeout);
+    println!(
+        "retries        : {} (base {}ms)",
+        cli.max_retries, cli.retry_delay_ms
+    );
     match &cli.prompt_file {
         Some(p) => println!("prompt file    : {}", p.display()),
         None => println!("prompt file    : (none)"),

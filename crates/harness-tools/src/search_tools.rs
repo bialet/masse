@@ -113,6 +113,7 @@ impl Tool for Grep {
                 status: crate::tool::ToolStatus::Ok,
                 output: stdout,
                 exit_code: out.exit_code,
+                terminate: None,
             }
         } else {
             ToolResult::from_cmd(&out)
@@ -199,6 +200,7 @@ impl Tool for FindGlob {
             status: crate::tool::ToolStatus::Ok,
             output: stdout,
             exit_code: out.exit_code,
+            terminate: None,
         }
     }
 }

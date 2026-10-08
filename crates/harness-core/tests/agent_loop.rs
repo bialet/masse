@@ -2,6 +2,7 @@
 //! call `write_file`, then finishes. Verifies tool dispatch and CSV logging.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use harness_core::{
     Agent, AgentConfig, AgentEvent, AgentHandle, ChatRequest, ChatResponse, Provider,
+    ProviderError, ProviderResult, ToolCall,
 };
 use harness_session::SessionStore;
 use harness_tools::{builtin_registry, ToolContext};
@@ -24,7 +26,7 @@ impl Provider for ScriptedProvider {
         "scripted"
     }
 
-    async fn complete(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
         Ok(self
             .responses
             .lock()
@@ -120,8 +122,8 @@ impl Provider for FailingProvider {
     fn name(&self) -> &str {
         "failing"
     }
-    async fn complete(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
-        anyhow::bail!("boom")
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
+        Err(ProviderError::Permanent("boom".into()))
     }
 }
 
@@ -133,9 +135,53 @@ impl Provider for HangingProvider {
     fn name(&self) -> &str {
         "hanging"
     }
-    async fn complete(&self, _request: ChatRequest) -> anyhow::Result<ChatResponse> {
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
         tokio::time::sleep(Duration::from_secs(3600)).await;
         unreachable!()
+    }
+}
+
+/// A provider that fails transiently a few times, then succeeds.
+struct RetryThenOk {
+    failures: usize,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for RetryThenOk {
+    fn name(&self) -> &str {
+        "retry"
+    }
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < self.failures {
+            Err(ProviderError::Retryable(format!("transient {n}")))
+        } else {
+            Ok(ChatResponse {
+                content: "ok".into(),
+                ..Default::default()
+            })
+        }
+    }
+}
+
+/// A provider that asks to call the `finish` tool.
+struct FinishProvider;
+
+#[async_trait]
+impl Provider for FinishProvider {
+    fn name(&self) -> &str {
+        "finish"
+    }
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
+        Ok(ChatResponse {
+            tool_calls: vec![ToolCall {
+                id: "f1".into(),
+                name: "finish".into(),
+                arguments: r#"{"summary":"all done","success":true}"#.into(),
+            }],
+            ..Default::default()
+        })
     }
 }
 
@@ -219,6 +265,77 @@ async fn cancel_aborts_a_hanging_turn() {
     .unwrap_or(false);
     assert!(cancelled, "cancel must produce an Error event");
     handle.shutdown();
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn retries_transient_errors_then_succeeds() {
+    let root = std::env::temp_dir().join(format!("masse-retry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(RetryThenOk {
+        failures: 2,
+        calls: calls.clone(),
+    });
+    let session = Arc::new(SessionStore::new(root.join("session.csv")));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(builtin_registry()),
+        ToolContext::new(&root),
+        session,
+        AgentConfig {
+            model: "test".into(),
+            system_prompt: "test".into(),
+            max_retries: 5,
+            retry_delay_ms: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let (tx, mut rx) = broadcast::channel(64);
+    let reply = agent.send("hi", Some(&tx)).await.unwrap();
+    assert_eq!(reply, "ok");
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "two retries then success");
+
+    let mut saw_retry = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::Retrying { .. }) {
+            saw_retry = true;
+        }
+    }
+    assert!(saw_retry, "a Retrying event must be emitted");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn finish_tool_ends_the_turn() {
+    let root = std::env::temp_dir().join(format!("masse-finish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut agent = build_agent(Arc::new(FinishProvider), &root).await;
+    let (tx, mut rx) = broadcast::channel(64);
+    let reply = agent.send("do it", Some(&tx)).await.unwrap();
+    assert_eq!(reply, "all done");
+
+    let mut finished = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Finished { summary, success } = event {
+            finished = Some((summary, success));
+        }
+    }
+    assert_eq!(finished, Some(("all done".to_string(), true)));
+
+    let events = agent.session().read_all().await.unwrap();
+    assert!(events
+        .iter()
+        .any(|e| e.event_type == "tool_result" && e.tool == "finish"));
 
     let _ = std::fs::remove_dir_all(&root);
 }

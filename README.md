@@ -48,6 +48,7 @@ default, configurable per call (`timeout_secs`) or globally (`--timeout`).
 | SQLite (CLI) | `sqlite_query`, `sqlite_execute` (invoke `sqlite3`) |
 | Bialet (CLI) | `bialet_run`, `bialet_validate`, `bialet_test`, `bialet_server_start`, `bialet_server_stop`, `bialet_log_read`, `bialet_docs` |
 | Web (CLI) | `curl` |
+| Control | `finish` (the model calls it to declare the task done) |
 | Skills (dynamic) | one tool per `skills/<name>/SKILL.md` |
 
 Bialet tools map to the framework CLI:
@@ -160,6 +161,8 @@ file.
 | `--request-timeout` | — | `120` | Per-request provider timeout (s) |
 | `--prompt-file` | `MASSE_PROMPT_FILE` | — | Extra initial prompt appended on top of the Bialet guide |
 | `--max-iterations` | — | `24` | Tool iterations per turn |
+| `--max-retries` | — | `3` | Retries per model call for transient errors (`0` disables) |
+| `--retry-delay-ms` | — | `800` | Base delay for the retry backoff |
 | `--temperature` | — | `0.2` | Sampling temperature |
 | `--print-config` | — | — | Print resolved config and exit |
 
@@ -211,16 +214,37 @@ A file that only contains a Sphinx `literalinclude` — like Bialet's
 so masse always knows Bialet, even offline. `--prompt-file` adds an extra prompt
 on top (for project-specific or overriding instructions).
 
-## Long turns and errors
+## Long turns, retries and completion
 
-A turn always ends with exactly one terminal event (`TurnFinished` or `Error`),
-so a front end can never get stuck on "thinking". On top of that:
+A turn always ends with exactly one terminal event (`Finished`, `TurnFinished`
+or `Error`), so a front end can never get stuck on "thinking". On top of that:
 
-- the provider has a 10 s connect timeout and a configurable request timeout
-  (`--request-timeout`, default 120 s);
+- **Bounded retries**: transient provider failures (timeouts, connection
+  resets, HTTP 429/5xx) are retried up to `--max-retries` times with an
+  exponential backoff starting at `--retry-delay-ms`, then the turn fails
+  cleanly. Permanent failures (bad request, auth, malformed response) are not
+  retried. A `retrying` event is emitted while this happens.
+- the provider also has a 10 s connect timeout and a `--request-timeout`
+  (default 120 s);
 - external commands are killed after their timeout (30 s default);
 - a panic in the agent is caught and reported as an error;
 - in the TUI, **Esc** cancels the in-flight turn, and **Ctrl-C** quits.
+
+### Knowing when the task is finished
+
+Completion is explicit: the model calls the **`finish`** tool with a short
+summary (and `success`) once the request is satisfied. The harness then stops
+the turn and reports it everywhere:
+
+- **TUI**: a green `✔ finished: <summary>` line and status `done` (red `failed`
+  when `success=false`);
+- **server**: a WebSocket event `{"type":"event","event":{"kind":"finished",…}}`,
+  and `/api/session` exposes `"finished": true|false`;
+- **`session.csv`**: the call is recorded as `tool_call` / `tool_result` rows
+  with `tool=finish`.
+
+`TurnFinished` is the fallback for when the model simply stops calling tools
+without calling `finish`.
 
 ## HTTP API
 

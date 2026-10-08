@@ -39,10 +39,20 @@ This keeps the conversation single-threaded (no locking around the message
 history) while letting any number of subscribers render it. The TUI and the
 WebSocket each subscribe to the same broadcast channel.
 
-Each turn emits exactly one terminal event (`TurnFinished` or `Error`), the
-provider has connect/request timeouts, and a panic inside the agent is caught
-and surfaced as an error, so a front end never gets stuck. The actor also
-accepts `Cancel`, which drops the in-flight turn (used by the TUI's Esc key).
+Each turn emits exactly one terminal event (`Finished`, `TurnFinished` or
+`Error`), the provider has connect/request timeouts, and a panic inside the
+agent is caught and surfaced as an error, so a front end never gets stuck. The
+actor also accepts `Cancel`, which drops the in-flight turn (used by the TUI's
+Esc key).
+
+### Retries and completion
+
+Transient provider failures are classified (`ProviderError::Retryable`) and
+retried up to `max_retries` with exponential backoff; permanent failures fail
+immediately. The model ends a task explicitly by calling the `finish` tool,
+which sets a `Terminate` flag on its `ToolResult`; the agent stops and emits
+`AgentEvent::Finished`. If the model just stops, the agent emits
+`TurnFinished` instead.
 
 ### Providers
 
