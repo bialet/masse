@@ -122,6 +122,22 @@ description: Build Bialet web apps step by step.
 …instructions…
 ```
 
+## Automatic commits
+
+After every turn masse commits the workspace, so each step of the work is a
+checkpoint. If the project is not a Git repository yet, it runs `git init`
+first (and sets a local `user.name` / `user.email` only when none is
+configured, so the commit succeeds).
+
+- The commit message is `masse: <first line of your request>`.
+- When a turn changes nothing, no commit is made.
+- Runtime state (`.masse/`, `_db.sqlite*`) is gitignored, so it is never
+  committed.
+- The event stream gets a `notice` with the short hash, visible in the TUI and
+  in `.masse/masse.log`.
+
+Disable it with `--no-auto-commit`.
+
 ## Architecture
 
 A Cargo workspace of focused crates:
@@ -161,6 +177,7 @@ file.
 | `--request-timeout` | — | `120` | Per-request provider timeout (s) |
 | `--prompt-file` | `MASSE_PROMPT_FILE` | — | Extra initial prompt appended on top of the Bialet guide |
 | `--max-iterations` | — | `50` | Tool-call iterations per turn; on reaching the cap the agent asks for a final answer without tools |
+| `--no-auto-commit` | — | — | Disable the automatic git commit after every turn |
 | `--max-retries` | — | `3` | Retries per model call for transient errors (`0` disables) |
 | `--retry-delay-ms` | — | `800` | Base delay for the retry backoff |
 | `--temperature` | — | `0.2` | Sampling temperature |

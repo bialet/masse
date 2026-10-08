@@ -62,6 +62,14 @@ If the model keeps calling tools, the turn stops at `max_iterations`; instead of
 failing, the agent makes one final completion request with no tools so the model
 still produces an answer, and emits a `Notice`.
 
+### Automatic commits
+
+When `auto_commit` is enabled (the CLI enables it by default), `Agent::send`
+prepares the workspace once — `git init` when there is no repository, plus a
+local identity if none is set — and after each turn runs `git add -A` and
+`git commit`. A clean tree produces no commit; the result is emitted as a
+`Notice`.
+
 ### Providers
 
 `harness_core::Provider` is one async method:

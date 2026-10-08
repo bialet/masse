@@ -39,6 +39,9 @@ How to work:
 - When the user's request is fully satisfied, call the `finish` tool with a
   short summary. That is the explicit "I am done" signal; do not just go quiet
   while steps remain.
+- The harness commits your changes automatically after every turn (it runs
+  `git init` for you if the project is not a repository yet). You do not need
+  to create commits yourself unless the user asks for a specific one.
 
 Bialet essentials (always follow, even without the full guide below):
 - Bialet apps are classic multi-page, server-rendered apps, not SPAs. A file's

@@ -91,6 +91,10 @@ struct Cli {
     #[arg(long, default_value_t = 50)]
     max_iterations: usize,
 
+    /// Disable the automatic git commit after every turn.
+    #[arg(long)]
+    no_auto_commit: bool,
+
     /// Sampling temperature.
     #[arg(long, default_value_t = 0.2)]
     temperature: f32,
@@ -209,6 +213,7 @@ async fn run() -> Result<()> {
         max_iterations: cli.max_iterations,
         max_retries: cli.max_retries,
         retry_delay_ms: cli.retry_delay_ms,
+        auto_commit: !cli.no_auto_commit,
         system_prompt,
     };
 
@@ -320,6 +325,14 @@ fn print_config(
     println!(
         "retries        : {} (base {}ms)",
         cli.max_retries, cli.retry_delay_ms
+    );
+    println!(
+        "auto-commit    : {}",
+        if cli.no_auto_commit {
+            "off"
+        } else {
+            "on (git init if needed)"
+        }
     );
     match &cli.prompt_file {
         Some(p) => println!("prompt file    : {}", p.display()),

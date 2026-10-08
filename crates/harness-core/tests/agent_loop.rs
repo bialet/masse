@@ -418,3 +418,69 @@ async fn iteration_cap_wraps_up_instead_of_failing() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn auto_commit_commits_after_a_turn() {
+    let git_ok = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !git_ok {
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!("masse-autocommit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut responses = VecDeque::new();
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![harness_core::ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path":"f.txt","content":"hi"}"#.into(),
+        }],
+        finish_reason: None,
+    });
+    responses.push_back(ChatResponse {
+        content: "done".into(),
+        tool_calls: vec![],
+        finish_reason: None,
+    });
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(responses),
+    });
+    let session = Arc::new(SessionStore::new(root.join("session.csv")));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(builtin_registry()),
+        ToolContext::new(&root),
+        session,
+        AgentConfig {
+            model: "test".into(),
+            system_prompt: "test".into(),
+            auto_commit: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let reply = agent.send("create f.txt", None).await.unwrap();
+    assert_eq!(reply, "done");
+    assert!(root.join(".git").exists(), "git repo should be created");
+    let log = std::process::Command::new("git")
+        .args(["log", "--oneline"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(log.status.success());
+    assert!(
+        !log.stdout.is_empty(),
+        "the turn's changes should have been committed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::FutureExt;
 use harness_session::{encode_json_args, Event, SessionStore, Status as SessionStatus};
+use harness_tools::cli::{run as run_cmd, CmdSpec};
 use harness_tools::{ToolContext, ToolRegistry, ToolStatus};
 use tokio::sync::{broadcast, mpsc};
 
@@ -22,6 +23,8 @@ pub struct AgentConfig {
     pub max_retries: usize,
     /// Base delay for the retry backoff, in milliseconds.
     pub retry_delay_ms: u64,
+    /// Commit the workspace after every turn (and `git init` if needed).
+    pub auto_commit: bool,
     pub system_prompt: String,
 }
 
@@ -33,6 +36,7 @@ impl Default for AgentConfig {
             max_iterations: 50,
             max_retries: 3,
             retry_delay_ms: 800,
+            auto_commit: false,
             system_prompt: String::new(),
         }
     }
@@ -42,6 +46,16 @@ impl Default for AgentConfig {
 fn retry_delay(base_ms: u64, attempt: u32) -> u64 {
     let factor = 1u64 << attempt.saturating_sub(1).min(6);
     base_ms.saturating_mul(factor).min(15_000)
+}
+
+/// First line of `text`, trimmed and truncated to `max` characters.
+fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= max {
+        line.to_string()
+    } else {
+        line.chars().take(max).collect()
+    }
 }
 
 /// How a turn ended.
@@ -102,6 +116,9 @@ pub struct Agent {
     session: Arc<SessionStore>,
     config: AgentConfig,
     messages: Vec<ChatMessage>,
+    /// Whether the git repo was prepared for auto-commit: `None` = not tried,
+    /// `Some(true)` = ready, `Some(false)` = setup failed.
+    repo_ready: Option<bool>,
 }
 
 impl Agent {
@@ -128,7 +145,68 @@ impl Agent {
             session,
             config,
             messages,
+            repo_ready: None,
         })
+    }
+
+    /// Run a git command in the workspace root.
+    async fn git(&self, args: &[&str]) -> harness_tools::cli::CmdOutput {
+        let spec = CmdSpec::new("git").args(args.iter().map(|a| a.to_string()));
+        run_cmd(&spec, &self.ctx.root, Duration::from_secs(30)).await
+    }
+
+    /// Make sure the workspace is a git repo able to commit: `git init` when
+    /// there is no repository, and a local identity when none is configured.
+    pub async fn ensure_git_repo(&self) -> Result<()> {
+        // Use the enclosing repository if there is one; otherwise make the
+        // workspace its own repo.
+        let inside = self.git(&["rev-parse", "--is-inside-work-tree"]).await;
+        if !inside.success() || inside.stdout.trim() != "true" {
+            let out = self.git(&["init", "-q"]).await;
+            if !out.success() {
+                return Err(anyhow::anyhow!(
+                    "git init failed in {}: {}",
+                    self.ctx.root.display(),
+                    out.to_agent_text()
+                ));
+            }
+        }
+        let email = self.git(&["config", "user.email"]).await;
+        if email.stdout.trim().is_empty() {
+            let _ = self.git(&["config", "user.email", "masse@localhost"]).await;
+            let _ = self.git(&["config", "user.name", "masse"]).await;
+        }
+        Ok(())
+    }
+
+    /// Commit the workspace after a turn. Returns a short report when something
+    /// was committed, or `None` when the tree was already clean.
+    pub async fn commit_turn(&self, label: &str) -> Result<Option<String>> {
+        let status = self.git(&["status", "--porcelain"]).await;
+        if !status.success() {
+            return Err(anyhow::anyhow!(
+                "git status failed: {}",
+                status.to_agent_text()
+            ));
+        }
+        if status.stdout.trim().is_empty() {
+            return Ok(None);
+        }
+        let add = self.git(&["add", "-A"]).await;
+        if !add.success() {
+            return Err(anyhow::anyhow!("git add failed: {}", add.to_agent_text()));
+        }
+        let message = format!("masse: {}", first_line(label, 72));
+        let commit = self.git(&["commit", "-q", "-m", &message]).await;
+        if !commit.success() {
+            return Err(anyhow::anyhow!(
+                "git commit failed: {}",
+                commit.to_agent_text()
+            ));
+        }
+        let hash = self.git(&["rev-parse", "--short", "HEAD"]).await;
+        let short = hash.stdout.trim().to_string();
+        Ok(Some(format!("{short} {message}")))
     }
 
     pub fn messages(&self) -> &[ChatMessage] {
@@ -152,6 +230,19 @@ impl Agent {
         text: &str,
         sink: Option<&broadcast::Sender<AgentEvent>>,
     ) -> Result<String> {
+        // Prepare the repo once, so auto-commit can work.
+        if self.config.auto_commit && self.repo_ready.is_none() {
+            match self.ensure_git_repo().await {
+                Ok(()) => self.repo_ready = Some(true),
+                Err(e) => {
+                    self.repo_ready = Some(false);
+                    if let Some(s) = sink {
+                        let _ = s.send(AgentEvent::Notice(format!("auto-commit disabled: {e}")));
+                    }
+                }
+            }
+        }
+
         let result = self.run_turn(text, sink).await;
         if let Some(s) = sink {
             match &result {
@@ -169,6 +260,24 @@ impl Agent {
                 }
             }
         }
+
+        // Commit whatever the turn changed.
+        if self.config.auto_commit && self.repo_ready == Some(true) {
+            match self.commit_turn(text).await {
+                Ok(Some(report)) => {
+                    if let Some(s) = sink {
+                        let _ = s.send(AgentEvent::Notice(format!("committed {report}")));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    if let Some(s) = sink {
+                        let _ = s.send(AgentEvent::Notice(format!("auto-commit failed: {e}")));
+                    }
+                }
+            }
+        }
+
         result.map(|outcome| outcome.text().to_string())
     }
 
