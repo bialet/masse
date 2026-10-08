@@ -2,6 +2,7 @@
 //! argument array; background servers are tracked in the in-memory registry.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
@@ -14,7 +15,16 @@ use crate::tool::{
 const DEFAULT_SERVER_KEY: &str = "bialet_server";
 
 fn log_path(ctx: &ToolContext) -> PathBuf {
-    ctx.root.join(".tmp").join("output.log")
+    ctx.root.join(".masse").join("log.txt")
+}
+
+/// The last `n` lines of a text blob.
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= n {
+        return text.to_string();
+    }
+    lines[lines.len() - n..].join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +79,7 @@ impl Tool for BialetValidate {
     }
 
     fn description(&self) -> &str {
-        "Validate the syntax of a Wren file with `bialet -t <file>`."
+        "Validate the syntax of a Wren file with `bialet -q -t <file>`. Quiet by default: success returns exit 0 with no output; on failure the compiler diagnostics are returned."
     }
 
     fn schema(&self) -> Json {
@@ -79,6 +89,11 @@ impl Tool for BialetValidate {
                     "file",
                     "string",
                     "Wren file to validate, relative to the project root.",
+                ),
+                (
+                    "quiet",
+                    "boolean",
+                    "Pass -q so a successful check prints nothing. Default: true.",
                 ),
                 ("timeout_secs", "integer", "Override the default timeout."),
             ],
@@ -95,8 +110,13 @@ impl Tool for BialetValidate {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
-        let spec =
-            CmdSpec::new(&ctx.bialet_bin).args(vec!["-t".into(), path.display().to_string()]);
+        let mut a: Vec<String> = Vec::new();
+        if opt_bool(&args, "quiet", true) {
+            a.push("-q".into());
+        }
+        a.push("-t".into());
+        a.push(path.display().to_string());
+        let spec = CmdSpec::new(&ctx.bialet_bin).args(a);
         let out = ctx
             .run(&spec, ctx.timeout(opt_u64(&args, "timeout_secs")))
             .await;
@@ -117,7 +137,7 @@ impl Tool for BialetTest {
     }
 
     fn description(&self) -> &str {
-        "Run the Bialet test suite with `bialet -T [dir] [-q]`."
+        "Run the Bialet test suite with `bialet [-q] -T [dir]`."
     }
 
     fn schema(&self) -> Json {
@@ -140,16 +160,18 @@ impl Tool for BialetTest {
     }
 
     async fn call(&self, ctx: &ToolContext, args: Json) -> ToolResult {
-        let mut a: Vec<String> = vec!["-T".into()];
+        // `-T` may take an optional directory, so flags must precede it.
+        let mut a: Vec<String> = Vec::new();
+        if opt_bool(&args, "quiet", false) {
+            a.push("-q".into());
+        }
+        a.push("-T".into());
         if let Some(rel) = opt_str(&args, "dir") {
             let path = match ctx.resolve(&rel) {
                 Ok(p) => p,
                 Err(e) => return ToolResult::err(e),
             };
             a.push(path.display().to_string());
-        }
-        if opt_bool(&args, "quiet", false) {
-            a.push("-q".into());
         }
         let spec = CmdSpec::new(&ctx.bialet_bin).args(a);
         // Tests can legitimately take longer than the default.
@@ -172,7 +194,7 @@ impl Tool for BialetServerStart {
     }
 
     fn description(&self) -> &str {
-        "Start a Bialet server in the background (`bialet -p <port> <path>`). Output is written to .tmp/output.log. Only one server per name is tracked."
+        "Start a Bialet server in the background (`bialet -p <port> <path>`). Output is written to .masse/log.txt. Only one server per name is tracked, and a server that exits immediately is reported as an error with its log."
     }
 
     fn schema(&self) -> Json {
@@ -189,7 +211,7 @@ impl Tool for BialetServerStart {
                     "string",
                     "Registry key for this server. Default: bialet_server.",
                 ),
-                ("log", "string", "Log file path. Default: .tmp/output.log."),
+                ("log", "string", "Log file path. Default: .masse/log.txt."),
             ],
             &[],
         )
@@ -211,26 +233,55 @@ impl Tool for BialetServerStart {
             None => log_path(ctx),
         };
 
-        // bialet writes its log to the file via -l, and serves app_dir.
+        // Let bialet log to stdout and capture stdout+stderr into the log file.
+        // This also records startup errors (e.g. a bind failure) that would
+        // otherwise be lost.
         let cmd_args = vec![
             "-p".to_string(),
             port.to_string(),
-            "-l".to_string(),
-            log.display().to_string(),
             app_dir.display().to_string(),
         ];
         match ctx
             .processes
-            .start(&name, &ctx.bialet_bin, &cmd_args, &ctx.root, None)
+            .start(&name, &ctx.bialet_bin, &cmd_args, &ctx.root, Some(&log))
             .await
         {
-            Ok(pid) => ToolResult::ok(format!(
-                "started `{} -p {} {}` (pid {pid}); log: {}",
-                ctx.bialet_bin,
-                port,
-                ctx.display_path(&app_dir),
-                ctx.display_path(&log)
-            )),
+            Ok(pid) => {
+                // A bind failure (e.g. the port is taken) makes bialet exit
+                // immediately; surface that instead of a false "started".
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                if !ctx.processes.is_running(&name).await {
+                    let log_text = tokio::fs::read_to_string(&log).await.unwrap_or_default();
+                    let tail = tail_lines(log_text.trim_end(), 20);
+                    let detail = if tail.is_empty() {
+                        "(log is empty)".to_string()
+                    } else {
+                        tail
+                    };
+                    return ToolResult::err(format!(
+                        "`{} -p {}` exited immediately (pid {pid}); log {}:\n{}",
+                        ctx.bialet_bin,
+                        port,
+                        ctx.display_path(&log),
+                        detail
+                    ));
+                }
+                let shown_dir = {
+                    let d = ctx.display_path(&app_dir);
+                    if d.is_empty() {
+                        ".".to_string()
+                    } else {
+                        d
+                    }
+                };
+                ToolResult::ok(format!(
+                    "started `{} -p {} {}` (pid {pid}); log: {}",
+                    ctx.bialet_bin,
+                    port,
+                    shown_dir,
+                    ctx.display_path(&log)
+                ))
+            }
             Err(e) => ToolResult::err(e),
         }
     }
@@ -297,13 +348,13 @@ impl Tool for BialetLogRead {
     }
 
     fn description(&self) -> &str {
-        "Read the Bialet server log (.tmp/output.log by default). Returns the tail of the file."
+        "Read the Bialet server log (.masse/log.txt by default). Returns the tail of the file."
     }
 
     fn schema(&self) -> Json {
         schema_object(
             &[
-                ("file", "string", "Log file path. Default: .tmp/output.log."),
+                ("file", "string", "Log file path. Default: .masse/log.txt."),
                 (
                     "tail",
                     "integer",
@@ -315,7 +366,7 @@ impl Tool for BialetLogRead {
     }
 
     async fn call(&self, ctx: &ToolContext, args: Json) -> ToolResult {
-        let rel = opt_str(&args, "file").unwrap_or_else(|| ".tmp/output.log".to_string());
+        let rel = opt_str(&args, "file").unwrap_or_else(|| ".masse/log.txt".to_string());
         let path = match ctx.resolve(&rel) {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),

@@ -133,10 +133,15 @@ async fn run() -> Result<()> {
         .session
         .clone()
         .map(|p| if p.is_absolute() { p } else { root.join(p) })
-        .unwrap_or_else(|| root.join("session.csv"));
+        .unwrap_or_else(|| root.join(".masse").join("session.csv"));
 
     // Project context: AGENTS.md, skills, docs.
     let project = ProjectContext::load(&root, cli.bialet_docs.clone()).await;
+
+    // Keep runtime state out of the user's Git history.
+    if let Err(e) = harness_core::context::ensure_workspace_gitignore(&root).await {
+        eprintln!("[masse] warning: could not update .gitignore: {e}");
+    }
 
     // Tools: built-ins plus one tool per discovered skill.
     let mut registry = builtin_registry();

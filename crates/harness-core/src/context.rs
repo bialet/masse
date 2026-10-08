@@ -116,6 +116,37 @@ pub fn literalinclude_target(content: &str) -> Option<String> {
     None
 }
 
+/// Ensure the workspace `.gitignore` ignores masse's runtime state.
+///
+/// Adds `.masse/` and `_db.sqlite*` when they are missing. Returns whether the
+/// file changed. Best-effort: a failure must not stop the harness.
+pub async fn ensure_workspace_gitignore(root: &Path) -> std::io::Result<bool> {
+    let path = root.join(".gitignore");
+    let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    let has = |needle: &str| existing.lines().any(|l| l.trim() == needle);
+    let needs_masse = !(has(".masse/") || has(".masse"));
+    let needs_db = !has("_db.sqlite*");
+    if !needs_masse && !needs_db {
+        return Ok(false);
+    }
+    let mut out = existing;
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    out.push_str("# masse (AI harness): runtime state and Bialet's SQLite database\n");
+    if needs_masse {
+        out.push_str(".masse/\n");
+    }
+    if needs_db {
+        out.push_str("_db.sqlite*\n");
+    }
+    tokio::fs::write(&path, out).await?;
+    Ok(true)
+}
+
 /// Look for a Bialet docs directory in the usual sibling locations.
 pub fn detect_docs(root: &Path) -> Option<PathBuf> {
     let candidates = [

@@ -198,9 +198,9 @@ impl Event {
             event_type: rec[1].clone(),
             role: rec[2].clone(),
             tool: rec[3].clone(),
-            args: rec[4].clone(),
+            args: csv::unescape_field(&rec[4]),
             status: rec[5].clone(),
-            output: rec[6].clone(),
+            output: csv::unescape_field(&rec[6]),
             exit_code: rec[7].clone(),
         })
     }

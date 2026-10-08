@@ -1,9 +1,11 @@
 # Session format
 
-The entire harness state is one append-only file: `session.csv`.
+The entire harness state is one append-only file: `.masse/session.csv`, kept in
+the workspace's `.masse/` directory.
 
 There is no `history/` directory and no `state.json`. The state is reconstructed
-by reading the CSV; file history is Git's job.
+by reading the CSV; file history is Git's job. masse ensures `.masse/` and
+`_db.sqlite*` are listed in the workspace `.gitignore`.
 
 ## Columns
 
@@ -24,21 +26,22 @@ timestamp,event_type,role,tool,args,status,output,exit_code
 
 Columns that do not apply to an event are left empty.
 
-## RFC 4180 encoding
+## Encoding: one event per line
 
-- A field is wrapped in double quotes when it contains a comma, a double quote,
-  a carriage return or a line feed.
-- Internal double quotes are doubled (`"` → `""`).
-- Tool output frequently contains newlines; it is quoted, so a single logical
-  record may span several physical lines. Parsing must therefore be a proper
-  CSV state machine (see `harness_session::csv`), not a line split.
+The goal is that **every record is exactly one physical line**.
 
-Example with a multi-line output:
+- Backslash, LF and CR are escaped in every field: `\` → `\\`, newline → `\n`,
+  carriage return → `\r`. A tool output that contained newlines therefore stays
+  on one line, and `output` reads back as the original text after unescaping.
+- After escaping, RFC 4180 quoting is applied only when a comma or a double
+  quote remains; internal double quotes are doubled (`"` → `""`).
+- The reader is a proper CSV state machine (`harness_session::csv`) and also
+  tolerates legacy records that used real newlines inside quoted fields.
+
+Example (a single line):
 
 ```
-2026-10-08T12:00:07.010Z,tool_result,tool,read_file,path=main.wren,ok,"fn main() {
-  System.print(\"hi\")
-}",",0
+2026-10-08T12:00:07.010Z,tool_result,tool,read_file,path=main.wren,ok,"fn main() {\n  System.print(\"hi\")\n}",0
 ```
 
 ## `args` encoding

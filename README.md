@@ -9,8 +9,8 @@ two front ends over the **same persisted session**:
 - an **HTTP/WebSocket server** built with `axum`, started with `masse --serve`.
 
 The single binary chooses one mode from `--tui` or `--serve`. Either way, the
-whole conversation lives in one file — `session.csv` — so you can start a turn
-in the terminal and keep following the same session from a browser.
+whole conversation lives in one file — `.masse/session.csv` — so you can start a
+turn in the terminal and keep following the same session from a browser.
 
 ```
 masse                       # terminal UI (default)
@@ -57,9 +57,9 @@ Bialet tools map to the framework CLI:
 | `bialet_run` | `bialet -r <code>` |
 | `bialet_validate` | `bialet -t <file>` |
 | `bialet_test` | `bialet -T [dir] [-q]` |
-| `bialet_server_start` | `bialet -p <port> <path>` (background, logs to `.tmp/output.log`) |
+| `bialet_server_start` | `bialet -p <port> <path>` (background, logs to `.masse/log.txt`) |
 | `bialet_server_stop` | kills the tracked background process |
-| `bialet_log_read` | native read of `.tmp/output.log` (or a given file) |
+| `bialet_log_read` | native read of `.masse/log.txt` (or a given file) |
 | `bialet_docs` | search/read the local Bialet/Wren documentation |
 
 Background processes started by `bialet_server_start` live **in the runtime
@@ -68,14 +68,15 @@ memory** of masse, never on disk. Restarting masse forgets them; `--tui` and
 
 ## Session persistence
 
-One file, **`session.csv`**, one event per line. No `history/` directory and no
-`state.json`: the state is reconstructed by reading the CSV, and file history is
-Git's job. The format is RFC 4180.
+One file, **`.masse/session.csv`**, **exactly one event per physical line**. No
+`history/` directory and no `state.json`: the state is reconstructed by reading
+the CSV, and file history is Git's job. The format is RFC 4180 for separators
+and quoting, with newlines escaped so records never span multiple lines.
 
 ```
 timestamp,event_type,role,tool,args,status,output,exit_code
 2026-10-08T12:00:00.000Z,session_start,system,,,,,
-2026-10-08T12:00:05.120Z,user_message,user,,,,Build me a guestbook, 
+2026-10-08T12:00:05.120Z,user_message,user,,,,Build me a guestbook,
 2026-10-08T12:00:06.900Z,tool_call,assistant,write_file,path=index.wren|content=...,,,
 2026-10-08T12:00:07.010Z,tool_result,tool,write_file,path=index.wren|content=...,ok,wrote 812 bytes,
 ```
@@ -84,10 +85,16 @@ timestamp,event_type,role,tool,args,status,output,exit_code
 - `status` ∈ `{ok, error}`.
 - `args` is a `k=v` map joined with `|`, values percent-encoded.
 - Cells that do not apply are left empty.
-- Fields containing a comma, a quote or a newline are quoted; internal quotes
-  are doubled. Tool output may contain newlines and is quoted accordingly.
+- Commas and double quotes are quoted RFC 4180 style; **newlines (and
+  backslashes) are escaped** as `\n`, `\r`, `\\`, so a field never contains a
+  real line break and every event stays on one line.
 
-The default path is `<workspace>/session.csv`; override it with `--session`.
+The default path is `<workspace>/.masse/session.csv`; override it with
+`--session`.
+
+On startup masse also ensures the workspace `.gitignore` ignores its runtime
+state: it adds `.masse/` and `_db.sqlite*` when they are missing (idempotent,
+best-effort).
 
 ## AGENTS.md integration
 
@@ -139,7 +146,7 @@ file.
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `-C`, `--workspace` | — | `.` | Project working directory |
-| `--session` | — | `<workspace>/session.csv` | Session file |
+| `--session` | — | `<workspace>/.masse/session.csv` | Session file |
 | `--tui` | — | **default** | Terminal UI |
 | `--serve` | — | — | HTTP/WebSocket server instead of the TUI |
 | `--host` / `--port` | — | `127.0.0.1` / `7001` | Server bind |

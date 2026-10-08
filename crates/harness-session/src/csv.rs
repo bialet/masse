@@ -5,15 +5,53 @@
 //! state machine over the whole document, so a quoted field may legitimately
 //! contain newlines (tool output frequently does).
 
-/// Encode a single field following RFC 4180.
+/// Escape the characters that would otherwise break the one-record-per-line
+/// invariant: backslash, LF and CR. The escaped form contains no newline, so a
+/// record is always exactly one physical line.
+pub fn escape_field(field: &str) -> String {
+    let mut out = String::with_capacity(field.len());
+    for ch in field.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Reverse [`escape_field`]. Unknown escapes are preserved verbatim.
+pub fn unescape_field(field: &str) -> String {
+    let mut out = String::with_capacity(field.len());
+    let mut chars = field.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Encode a single field: escape control characters, then apply RFC 4180
+/// quoting only when a comma or a double quote remains.
 pub fn encode_field(field: &str) -> String {
-    if field
-        .bytes()
-        .any(|b| b == b',' || b == b'"' || b == b'\n' || b == b'\r')
-    {
-        let mut out = String::with_capacity(field.len() + 2);
+    let escaped = escape_field(field);
+    if escaped.bytes().any(|b| b == b',' || b == b'"') {
+        let mut out = String::with_capacity(escaped.len() + 2);
         out.push('"');
-        for ch in field.chars() {
+        for ch in escaped.chars() {
             if ch == '"' {
                 out.push('"');
             }
@@ -22,7 +60,7 @@ pub fn encode_field(field: &str) -> String {
         out.push('"');
         out
     } else {
-        field.to_string()
+        escaped
     }
 }
 
@@ -116,11 +154,22 @@ mod tests {
             String::new(),
         ];
         let line = encode_record(&fields);
-        assert_eq!(
-            line,
-            "\"hello, world\",\"say \"\"hi\"\"\",\"line1\nline2\","
-        );
-        assert_eq!(parse_records(&line), vec![fields]);
+        assert!(!line.contains('\n'), "record must be a single line");
+        assert!(line.contains("line1\\nline2"));
+        let recs = parse_records(&line);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(unescape_field(&recs[0][0]), "hello, world");
+        assert_eq!(unescape_field(&recs[0][1]), "say \"hi\"");
+        assert_eq!(unescape_field(&recs[0][2]), "line1\nline2");
+        assert_eq!(recs[0][3], "");
+    }
+
+    #[test]
+    fn control_escape_roundtrip() {
+        let original = "a\\b\nc\rd";
+        let encoded = escape_field(original);
+        assert!(!encoded.contains('\n') && !encoded.contains('\r'));
+        assert_eq!(unescape_field(&encoded), original);
     }
 
     #[test]

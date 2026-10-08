@@ -224,3 +224,65 @@ async fn bialet_docs_search() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Locate a bialet binary: env override, then PATH, then the sibling build.
+fn bialet_binary() -> Option<String> {
+    if let Ok(bin) = std::env::var("MASSE_BIALET_BIN") {
+        if PathBuf::from(&bin).exists() || have(&bin) {
+            return Some(bin);
+        }
+    }
+    if have("bialet") {
+        return Some("bialet".into());
+    }
+    let sibling = PathBuf::from("/Users/albo/work/bialet/bialet/build/bialet");
+    sibling.exists().then(|| sibling.display().to_string())
+}
+
+#[tokio::test]
+async fn bialet_validate_quiet_and_server_lifecycle() {
+    let Some(bin) = bialet_binary() else {
+        return;
+    };
+    let root = temp_root("bialet2");
+    std::fs::write(root.join("ok.wren"), "System.print(\"hi\")\n").unwrap();
+    let mut ctx = ToolContext::new(&root);
+    ctx.bialet_bin = bin;
+    let reg = builtin_registry();
+
+    // Quiet validation of a valid file succeeds.
+    let r = reg
+        .call("bialet_validate", &ctx, json!({"file": "ok.wren"}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+
+    // Start a server: the log must land in .masse/log.txt.
+    let port = 7300 + (std::process::id() % 400) as u64;
+    let r = reg
+        .call("bialet_server_start", &ctx, json!({"port": port}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+    assert!(root.join(".masse/log.txt").exists(), "log file missing");
+
+    let r = reg.call("bialet_log_read", &ctx, json!({})).await;
+    assert!(!r.is_error(), "{}", r.output);
+
+    // A second server on the same port must be reported as a failure, not as a
+    // bogus success.
+    let r = reg
+        .call(
+            "bialet_server_start",
+            &ctx,
+            json!({"port": port, "name": "dup"}),
+        )
+        .await;
+    assert!(r.is_error(), "duplicate bind should fail: {}", r.output);
+    assert!(r.output.contains("exited immediately"), "{}", r.output);
+
+    let r = reg
+        .call("bialet_server_stop", &ctx, json!({"all": true}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
