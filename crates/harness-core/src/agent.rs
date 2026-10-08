@@ -30,7 +30,7 @@ impl Default for AgentConfig {
         AgentConfig {
             model: String::new(),
             temperature: 0.2,
-            max_iterations: 24,
+            max_iterations: 50,
             max_retries: 3,
             retry_delay_ms: 800,
             system_prompt: String::new(),
@@ -82,6 +82,8 @@ pub enum AgentEvent {
         max: u32,
         reason: String,
     },
+    /// Informational note (e.g. the iteration cap was reached).
+    Notice(String),
     /// The agent declared the task finished via the `finish` tool.
     Finished {
         summary: String,
@@ -287,10 +289,40 @@ impl Agent {
             }
         }
 
-        Err(anyhow::anyhow!(
-            "agent exceeded {} tool iterations without finishing",
+        // We reached the iteration cap. Rather than failing the turn, ask the
+        // model once more with tools disabled so it produces a real answer.
+        emit!(AgentEvent::Notice(format!(
+            "tool-call iteration limit ({}) reached; requesting a final answer without tools",
             self.config.max_iterations
-        ))
+        )));
+        let mut wrap_messages = self.messages.clone();
+        wrap_messages.push(ChatMessage::user(
+            "You have reached the maximum number of tool calls for this turn. \
+             Do not call any more tools. Reply with a concise summary of what you \
+             did, what remains to be done, and your best final answer.",
+        ));
+        let wrap_request = ChatRequest {
+            model: self.config.model.clone(),
+            messages: wrap_messages,
+            tools: Vec::new(),
+            temperature: self.config.temperature,
+        };
+        match self.provider.complete(wrap_request).await {
+            Ok(response) => {
+                if !response.content.trim().is_empty() {
+                    emit!(AgentEvent::AssistantMessage(response.content.clone()));
+                    self.session
+                        .append(&Event::assistant_message(&response.content))
+                        .await?;
+                    self.messages.push(ChatMessage::assistant(response.content.clone()));
+                }
+                Ok(TurnOutcome::Stopped(response.content))
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "agent reached the tool-call iteration limit ({}) and the wrap-up request failed: {e}",
+                self.config.max_iterations
+            )),
+        }
     }
 }
 

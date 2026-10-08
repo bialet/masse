@@ -87,8 +87,8 @@ struct Cli {
     #[arg(long, default_value_t = 30)]
     timeout: u64,
 
-    /// Maximum tool iterations per user turn.
-    #[arg(long, default_value_t = 24)]
+    /// Maximum tool iterations per user turn (safety cap).
+    #[arg(long, default_value_t = 50)]
     max_iterations: usize,
 
     /// Sampling temperature.
@@ -404,6 +404,7 @@ fn format_event(event: &AgentEvent) -> String {
             max,
             reason,
         } => format!("{ts} RETRY      {attempt}/{max}: {reason}\n"),
+        AgentEvent::Notice(message) => format!("{ts} NOTICE     {message}\n"),
         AgentEvent::Finished { summary, success } => {
             format!("{ts} FINISHED   success={success}: {summary}\n")
         }

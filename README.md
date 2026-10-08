@@ -160,7 +160,7 @@ file.
 | `--timeout` | — | `30` | Default external-command timeout (s) |
 | `--request-timeout` | — | `120` | Per-request provider timeout (s) |
 | `--prompt-file` | `MASSE_PROMPT_FILE` | — | Extra initial prompt appended on top of the Bialet guide |
-| `--max-iterations` | — | `24` | Tool iterations per turn |
+| `--max-iterations` | — | `50` | Tool-call iterations per turn; on reaching the cap the agent asks for a final answer without tools |
 | `--max-retries` | — | `3` | Retries per model call for transient errors (`0` disables) |
 | `--retry-delay-ms` | — | `800` | Base delay for the retry backoff |
 | `--temperature` | — | `0.2` | Sampling temperature |
@@ -228,6 +228,10 @@ or `Error`), so a front end can never get stuck on "thinking". On top of that:
   (default 120 s);
 - external commands are killed after their timeout (30 s default);
 - a panic in the agent is caught and reported as an error;
+- a per-turn **iteration cap** (`--max-iterations`, default 50) prevents runaway
+  tool loops. When it is reached the agent does not fail: it makes one more call
+  with **tools disabled** so the model produces a final answer (a `notice` event
+  marks this); the turn only errors if that wrap-up call itself fails;
 - **every event — including errors and retries — is appended to
   `.masse/masse.log`**, a human-readable runtime log, so there is always a
   place to see what failed. The server also exposes it at `GET /api/log`;

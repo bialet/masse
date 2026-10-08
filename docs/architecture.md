@@ -58,6 +58,10 @@ A task in `harness-cli` also subscribes to the same broadcast and appends every
 event (including errors and retries) to `.masse/masse.log`, a durable
 human-readable log; the server exposes it at `GET /api/log`.
 
+If the model keeps calling tools, the turn stops at `max_iterations`; instead of
+failing, the agent makes one final completion request with no tools so the model
+still produces an answer, and emits a `Notice`.
+
 ### Providers
 
 `harness_core::Provider` is one async method:

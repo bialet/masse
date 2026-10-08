@@ -273,6 +273,7 @@ fn agent_event_json(ev: &AgentEvent) -> JsonValue {
             "max": max,
             "reason": reason,
         }),
+        AgentEvent::Notice(message) => json!({ "kind": "notice", "message": message }),
         AgentEvent::Finished { summary, success } => json!({
             "kind": "finished",
             "summary": summary,
@@ -351,6 +352,7 @@ function connect() {
       else if (ev.kind === 'tool_call') append('tool', '  ⚙ ' + ev.name + ' ' + ev.args);
       else if (ev.kind === 'tool_result') append('result', '  ' + (ev.status === 'ok' ? '✔' : '✘') + ' ' + ev.name + '\n' + ev.output);
       else if (ev.kind === 'retrying') append('tool', '  ↻ retry ' + ev.attempt + '/' + ev.max + ' (' + ev.reason + ')');
+      else if (ev.kind === 'notice') append('result', '  • ' + ev.message);
       else if (ev.kind === 'finished') append(ev.success ? 'assistant' : 'error', (ev.success ? '✔ finished: ' : '✘ failed: ') + ev.summary);
       else if (ev.kind === 'error') append('error', 'error: ' + ev.message);
     }

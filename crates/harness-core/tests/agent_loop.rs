@@ -185,6 +185,37 @@ impl Provider for FinishProvider {
     }
 }
 
+/// A provider that always asks for a tool, to exercise the iteration cap.
+struct LoopingProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for LoopingProvider {
+    fn name(&self) -> &str {
+        "looping"
+    }
+    async fn complete(&self, request: ChatRequest) -> ProviderResult<ChatResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if request.tools.is_empty() {
+            // The wrap-up call: no tools offered, so answer in text.
+            Ok(ChatResponse {
+                content: "wrapped up".into(),
+                ..Default::default()
+            })
+        } else {
+            Ok(ChatResponse {
+                tool_calls: vec![ToolCall {
+                    id: "t".into(),
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                }],
+                ..Default::default()
+            })
+        }
+    }
+}
+
 async fn build_agent(provider: Arc<dyn Provider>, root: &std::path::Path) -> Agent {
     Agent::new(
         provider,
@@ -336,6 +367,54 @@ async fn finish_tool_ends_the_turn() {
     assert!(events
         .iter()
         .any(|e| e.event_type == "tool_result" && e.tool == "finish"));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn iteration_cap_wraps_up_instead_of_failing() {
+    let root = std::env::temp_dir().join(format!("masse-cap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(LoopingProvider {
+        calls: calls.clone(),
+    });
+    let session = Arc::new(SessionStore::new(root.join("session.csv")));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(builtin_registry()),
+        ToolContext::new(&root),
+        session,
+        AgentConfig {
+            model: "test".into(),
+            system_prompt: "test".into(),
+            max_iterations: 3,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let (tx, mut rx) = broadcast::channel(128);
+    let reply = agent.send("go", Some(&tx)).await.unwrap();
+    assert_eq!(reply, "wrapped up");
+    assert!(
+        calls.load(Ordering::SeqCst) >= 4,
+        "3 capped iterations plus one wrap-up call"
+    );
+
+    let mut saw_notice = false;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event, AgentEvent::Notice(_)) {
+            saw_notice = true;
+        }
+    }
+    assert!(
+        saw_notice,
+        "a Notice must be emitted when the cap is reached"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

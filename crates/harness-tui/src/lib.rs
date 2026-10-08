@@ -187,6 +187,9 @@ impl App {
                 self.push_plain(format!("↻ retry {attempt}/{max}: {reason}"), Color::Yellow);
                 self.status = format!("retrying {attempt}/{max}");
             }
+            AgentEvent::Notice(message) => {
+                self.push_plain(format!("• {message}"), Color::DarkGray);
+            }
             AgentEvent::Finished { summary, success } => {
                 let (mark, color, status) = if success {
                     ("✔", Color::Green, "done")
