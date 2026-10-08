@@ -11,9 +11,12 @@ whole conversation lives in one file — `session.csv` — so you can start a tu
 in the terminal and keep following the same session from a browser.
 
 ```
-masse --tui                 # terminal UI
+masse                       # terminal UI (default)
+masse --tui                 # terminal UI (explicit)
 masse --serve --port 7001   # http://127.0.0.1:7001 (+ ws://…/ws)
 ```
+
+If no front-end flag is given, `masse` starts the TUI.
 
 ## Philosophy: atomic tools, no shell
 
@@ -135,7 +138,8 @@ file.
 | --- | --- | --- | --- |
 | `-C`, `--workspace` | — | `.` | Project working directory |
 | `--session` | — | `<workspace>/session.csv` | Session file |
-| `--tui` / `--serve` | — | — | Front end (one required) |
+| `--tui` | — | **default** | Terminal UI |
+| `--serve` | — | — | HTTP/WebSocket server instead of the TUI |
 | `--host` / `--port` | — | `127.0.0.1` / `7001` | Server bind |
 | `--model` | `MASSE_MODEL` | `deepseek-chat` | Model id |
 | `--base-url` | `MASSE_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI-compatible base URL |

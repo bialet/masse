@@ -37,11 +37,11 @@ struct Cli {
     #[arg(long)]
     session: Option<PathBuf>,
 
-    /// Run the terminal UI.
+    /// Run the terminal UI (default).
     #[arg(long, conflicts_with = "serve")]
     tui: bool,
 
-    /// Run the HTTP/WebSocket server.
+    /// Run the HTTP/WebSocket server instead of the terminal UI.
     #[arg(long, conflicts_with = "tui")]
     serve: bool,
 
@@ -111,10 +111,6 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
-
-    if !cli.print_config && !cli.tui && !cli.serve {
-        bail!("choose a front end: `masse --tui` or `masse --serve` (see --help)");
-    }
 
     let root = std::fs::canonicalize(&cli.workspace)
         .with_context(|| format!("cannot resolve workspace {}", cli.workspace.display()))?;
@@ -188,7 +184,7 @@ async fn run() -> Result<()> {
     .context("initializing agent")?;
     let handle = AgentHandle::spawn(agent);
 
-    let result = if cli.tui {
+    let result = if !cli.serve {
         eprintln!(
             "[masse] TUI · provider={} model={} tools={} session={}",
             provider.name(),
@@ -235,13 +231,7 @@ fn print_config(
 ) {
     println!("workspace      : {}", root.display());
     println!("session        : {}", session_path.display());
-    let front = if cli.tui {
-        "tui"
-    } else if cli.serve {
-        "serve"
-    } else {
-        "(none; use --tui or --serve)"
-    };
+    let front = if cli.serve { "serve" } else { "tui" };
     println!("front end      : {front}");
     if cli.serve {
         println!("bind           : {}:{}", cli.host, cli.port);

@@ -690,7 +690,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
- "futures",
  "harness-core",
  "harness-session",
  "ratatui",

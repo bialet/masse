@@ -4,15 +4,15 @@
 //! session transcript, forwards typed messages to the actor and renders the
 //! streamed [`harness_core::AgentEvent`]s as they arrive.
 
+use std::io::IsTerminal;
 use std::time::Duration;
 
-use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use anyhow::{bail, Result};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use futures::StreamExt;
 use harness_core::{AgentEvent, AgentHandle};
 use harness_session::Event as SessionEvent;
 use ratatui::backend::CrosstermBackend;
@@ -224,13 +224,34 @@ fn label(text: &str, color: Color) -> Span<'static> {
 
 /// Run the TUI until the user quits.
 pub async fn run(config: TuiConfig, handle: AgentHandle) -> Result<()> {
+    // The TUI needs a real terminal; otherwise fail loudly instead of hanging.
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!(
+            "--tui requires an interactive terminal (stdin/stdout are not a TTY). \
+             Use --serve for a non-interactive environment."
+        );
+    }
+
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, config, handle).await;
+    // Read keys on a dedicated blocking thread. This is the most portable way to
+    // receive input across terminals (macOS Terminal, iTerm2, tmux, Linux TTYs)
+    // and avoids the async EventStream, which can silently deliver nothing on
+    // some platforms.
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    std::thread::spawn(move || {
+        while let Ok(event) = crossterm::event::read() {
+            if key_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = run_loop(&mut terminal, &config, handle, &mut key_rx).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -240,27 +261,27 @@ pub async fn run(config: TuiConfig, handle: AgentHandle) -> Result<()> {
 
 async fn run_loop<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
-    config: TuiConfig,
+    config: &TuiConfig,
     handle: AgentHandle,
+    key_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>,
 ) -> Result<()> {
-    let mut app = App::new(&config);
-    let mut events = EventStream::new();
+    let mut app = App::new(config);
     let mut agent_rx = handle.subscribe();
     let mut ticker = tokio::time::interval(Duration::from_millis(200));
 
     loop {
-        terminal.draw(|f| ui(f, &mut app, &config))?;
+        terminal.draw(|f| ui(f, &mut app, config))?;
         if app.should_quit {
             break;
         }
         tokio::select! {
-            maybe_event = events.next() => {
+            maybe_event = key_rx.recv() => {
                 match maybe_event {
-                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                    Some(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                         handle_key(&mut app, &handle, key);
                     }
-                    Some(Ok(_)) => {}
-                    Some(Err(_)) | None => app.should_quit = true,
+                    Some(_) => {}
+                    None => app.should_quit = true,
                 }
             }
             received = agent_rx.recv() => {
@@ -353,7 +374,7 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(2),
+            Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(frame.area());
@@ -381,14 +402,7 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
     frame.render_widget(transcript, chunks[0]);
 
     // Input
-    let mut input_text: String = app.input.iter().collect();
-    let cursor_byte = app.input[..app.cursor]
-        .iter()
-        .map(|c| c.len_utf8())
-        .sum::<usize>();
-    if cursor_byte <= input_text.len() {
-        input_text.insert(cursor_byte, '▌');
-    }
+    let input_text: String = app.input.iter().collect();
     let input = Paragraph::new(input_text)
         .style(Style::default().fg(Color::White))
         .block(
@@ -399,6 +413,11 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(input, chunks[1]);
+
+    // Place the real terminal cursor inside the input box.
+    let max_x = chunks[1].x + chunks[1].width.saturating_sub(2);
+    let cursor_x = (chunks[1].x + 1 + app.input[..app.cursor].len() as u16).min(max_x);
+    frame.set_cursor_position((cursor_x, chunks[1].y + 1));
 
     // Status
     let spinner = if app.running {
