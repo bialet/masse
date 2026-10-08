@@ -292,6 +292,10 @@ fn print_config(
         }
     );
     println!("skills         : {:?}", project.skill_names());
+    match &project.framework_prompt {
+        Some(fp) => println!("framework guide: {} (live)", fp.source.display()),
+        None => println!("framework guide: bundled with masse"),
+    }
     println!("tools ({}):", tool_names.len());
     for name in tool_names {
         println!("  - {name}");

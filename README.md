@@ -1,7 +1,9 @@
 # masse
 
-`masse` is an AI coding harness written in Rust. It runs on **Linux and macOS**
-only and offers two front ends over the **same persisted session**:
+`masse` is an AI coding harness written in Rust, purpose-built for building and
+maintaining web applications with **Bialet** (Wren + SQLite) rather than acting
+as a general-purpose shell agent. It runs on **Linux and macOS** only and offers
+two front ends over the **same persisted session**:
 
 - a **TUI** built with `ratatui`, started with `masse --tui`;
 - an **HTTP/WebSocket server** built with `axum`, started with `masse --serve`.
@@ -149,7 +151,7 @@ file.
 | `--bialet-docs` | `MASSE_BIALET_DOCS` | auto-detected | Docs directory for `bialet_docs` |
 | `--timeout` | — | `30` | Default external-command timeout (s) |
 | `--request-timeout` | — | `120` | Per-request provider timeout (s) |
-| `--prompt-file` | `MASSE_PROMPT_FILE` | — | Extra initial prompt file appended to the system prompt |
+| `--prompt-file` | `MASSE_PROMPT_FILE` | — | Extra initial prompt appended on top of the Bialet guide |
 | `--max-iterations` | — | `24` | Tool iterations per turn |
 | `--temperature` | — | `0.2` | Sampling temperature |
 | `--print-config` | — | — | Print resolved config and exit |
@@ -177,24 +179,30 @@ cargo test --workspace
 
 ## What goes into the system prompt
 
-The initial prompt is assembled by `harness-core/src/prompt.rs` at startup:
+masse is **Bialet-first**: the Bialet framework guide is part of the system
+prompt by default, so it writes idiomatic `.wren` from the first response.
+Composition (`harness-core/src/prompt.rs`):
 
-1. the base instructions (what masse is, how atomic tools work);
-2. a reference list of tool names;
-3. the repository `AGENTS.md`, injected verbatim as repository instructions
-   (user chat messages take priority over it);
-4. the list of discovered skills, if any;
-5. a pointer to the local Bialet/Wren docs, if found;
-6. the contents of `--prompt-file`, when given.
+1. base instructions: masse's role, the atomic-tool philosophy, and Bialet
+   essentials;
+2. the tool reference;
+3. the Bialet framework guide — a live copy if one is found, otherwise the copy
+   bundled in the binary (`assets/bialet_prompt.md`, embedded at build time);
+4. the repository `AGENTS.md` (chat messages take priority over it);
+5. the list of discovered skills;
+6. a pointer to the local docs;
+7. the contents of `--prompt-file`, when given.
 
-Notably, masse does **not** read any framework's `ai-prompt.md` automatically.
-Bialet's `docs/ai-prompt.md` is only reachable through the `bialet_docs` tool
-when the model calls it. To make a framework prompt part of the system prompt,
-pass it explicitly:
+The live guide is searched in this order:
 
-```bash
-masse --prompt-file ../bialet/docs/prompt-guide.md -C myapp
-```
+- in the workspace: `BIALET_PROMPT.md`, `prompt-guide.md`, `.masse/prompt.md`;
+- in the detected docs directory: `prompt-guide.md`, `prompt.md`, `ai-prompt.md`.
+
+A file that only contains a Sphinx `literalinclude` — like Bialet's
+`docs/ai-prompt.md` — is followed to its target, so it resolves to
+`prompt-guide.md` automatically. If nothing is found, the bundled copy is used,
+so masse always knows Bialet, even offline. `--prompt-file` adds an extra prompt
+on top (for project-specific or overriding instructions).
 
 ## Long turns and errors
 

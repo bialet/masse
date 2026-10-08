@@ -18,6 +18,16 @@ pub struct ProjectContext {
     pub skills: Vec<Skill>,
     /// Where the local Bialet/Wren documentation lives.
     pub docs_dir: Option<PathBuf>,
+    /// A live Bialet framework prompt found in the project or docs. When
+    /// absent, the harness falls back to the guide bundled in the binary.
+    pub framework_prompt: Option<FrameworkPrompt>,
+}
+
+/// A framework prompt loaded from disk.
+#[derive(Clone, Debug)]
+pub struct FrameworkPrompt {
+    pub source: PathBuf,
+    pub content: String,
 }
 
 impl ProjectContext {
@@ -28,17 +38,82 @@ impl ProjectContext {
             .filter(|p| p.is_dir())
             .or_else(|| detect_docs(root));
         let skills = load_skills(root).await;
+        let framework_prompt = load_framework_prompt(root, docs_dir.as_deref()).await;
         ProjectContext {
             root: root.to_path_buf(),
             agents_md,
             skills,
             docs_dir,
+            framework_prompt,
         }
     }
 
     pub fn skill_names(&self) -> Vec<String> {
         self.skills.iter().map(|s| s.name.clone()).collect()
     }
+}
+
+/// Load a live Bialet framework prompt, if one is available.
+///
+/// Search order: explicit project files first, then the detected docs
+/// directory. A file that only contains a `literalinclude` directive (for
+/// example Bialet's `docs/ai-prompt.md`) is followed to its target.
+pub async fn load_framework_prompt(
+    root: &Path,
+    docs_dir: Option<&Path>,
+) -> Option<FrameworkPrompt> {
+    let mut candidates: Vec<PathBuf> = vec![
+        root.join("BIALET_PROMPT.md"),
+        root.join("prompt-guide.md"),
+        root.join(".masse").join("prompt.md"),
+    ];
+    if let Some(docs) = docs_dir {
+        candidates.push(docs.join("prompt-guide.md"));
+        candidates.push(docs.join("prompt.md"));
+        candidates.push(docs.join("ai-prompt.md"));
+    }
+
+    for candidate in candidates {
+        let Ok(content) = tokio::fs::read_to_string(&candidate).await else {
+            continue;
+        };
+        // Follow a Sphinx literalinclude if the file is just a wrapper.
+        if let Some(target) = literalinclude_target(&content) {
+            let resolved = candidate
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&target);
+            if let Ok(inner) = tokio::fs::read_to_string(&resolved).await {
+                return Some(FrameworkPrompt {
+                    source: resolved,
+                    content: inner,
+                });
+            }
+        }
+        if content.trim().is_empty() {
+            continue;
+        }
+        return Some(FrameworkPrompt {
+            source: candidate,
+            content,
+        });
+    }
+    None
+}
+
+/// Extract the file name from a Sphinx `{literalinclude} <file>` directive.
+pub fn literalinclude_target(content: &str) -> Option<String> {
+    for line in content.lines() {
+        if let Some(idx) = line.find("literalinclude}") {
+            let rest = line[idx + "literalinclude}".len()..].trim();
+            if let Some(file) = rest.split_whitespace().next() {
+                if !file.is_empty() {
+                    return Some(file.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Look for a Bialet docs directory in the usual sibling locations.
@@ -279,5 +354,15 @@ mod tests {
         let (front, body) = split_frontmatter(content);
         assert!(front.is_none());
         assert_eq!(first_paragraph(&body).unwrap(), "A short description here.");
+    }
+
+    #[test]
+    fn finds_literalinclude_target() {
+        let content = "Intro\n\n```{literalinclude} prompt-guide.md\n:language: markdown\n```\n";
+        assert_eq!(
+            literalinclude_target(content).as_deref(),
+            Some("prompt-guide.md")
+        );
+        assert_eq!(literalinclude_target("no directive here"), None);
     }
 }

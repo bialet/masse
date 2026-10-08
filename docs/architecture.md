@@ -63,6 +63,16 @@ On startup the agent reads `session.csv` and rebuilds the message list with
 are replayed as user-role notes. Live turns keep full fidelity; only the
 reconstructed history is lossy, by design (one file, no JSON state).
 
+## Project context
+
+masse is Bialet-first. At startup `ProjectContext::load` reads `AGENTS.md`,
+discovers `skills/*/SKILL.md`, locates the Bialet docs, and looks for a live
+Bialet framework prompt (following Sphinx `literalinclude` wrappers). The
+system prompt is then assembled in `prompt.rs` from the base role, the tool
+reference, the Bialet guide (live copy if found, otherwise the copy embedded in
+the binary at `assets/bialet_prompt.md`), `AGENTS.md`, the skills index and a
+docs pointer.
+
 ## Tools
 
 `harness_tools::Tool` is the extension point:
