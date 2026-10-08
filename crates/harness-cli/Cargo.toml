@@ -1,0 +1,20 @@
+[package]
+name = "harness-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "masse"
+path = "src/main.rs"
+
+[dependencies]
+harness-core = { path = "../harness-core" }
+harness-tools = { path = "../harness-tools" }
+harness-session = { path = "../harness-session" }
+harness-tui = { path = "../harness-tui" }
+harness-server = { path = "../harness-server" }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }

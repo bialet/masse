@@ -1,0 +1,6 @@
+/target
+*.rs.bk
+.DS_Store
+# Local runtime state (session + bialet logs + started processes)
+session.csv
+.tmp/

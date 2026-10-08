@@ -1,0 +1,16 @@
+[package]
+name = "harness-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+harness-core = { path = "../harness-core" }
+harness-session = { path = "../harness-session" }
+harness-tools = { path = "../harness-tools" }
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
