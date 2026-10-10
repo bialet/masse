@@ -5,7 +5,8 @@ use serde_json::Value as Json;
 
 use crate::cli::{truncate_lines, CmdSpec};
 use crate::tool::{
-    opt_bool, opt_str, opt_u64, req_str, schema_object, Tool, ToolContext, ToolResult,
+    opt_bool, opt_str, opt_str_array, opt_u64, req_str, schema_object, Tool, ToolContext,
+    ToolResult,
 };
 
 const MAX_OUTPUT_LINES: usize = 400;
@@ -19,7 +20,7 @@ impl Tool for Curl {
     }
 
     fn description(&self) -> &str {
-        "Fetch a URL with the system `curl`. Returns the body, or writes it to a file inside the project when `output` is set. Follows redirects by default."
+        "Fetch a URL with the system `curl`. Returns the body, or writes it to a file inside the project when `output` is set. Follows redirects by default. Use `data` to send a request body (form fields like `a=1&b=2`, or JSON with a `Content-Type` header)."
     }
 
     fn schema(&self) -> Json {
@@ -31,7 +32,17 @@ impl Tool for Curl {
                     "string",
                     "Optional file path to write the body to.",
                 ),
-                ("method", "string", "HTTP method. Default: GET."),
+                ("method", "string", "HTTP method. Default: GET (POST when `data` is set)."),
+                (
+                    "data",
+                    "string",
+                    "Request body. `a=1&b=2` for a form, or a JSON string with a Content-Type header.",
+                ),
+                (
+                    "header",
+                    "string",
+                    "Extra request header, e.g. `Content-Type: application/json`. Pass an array to send several.",
+                ),
                 ("follow", "boolean", "Follow redirects. Default: true."),
                 ("timeout_secs", "integer", "Override the default timeout."),
             ],
@@ -58,6 +69,14 @@ impl Tool for Curl {
         if let Some(method) = opt_str(&args, "method") {
             a.push("-X".into());
             a.push(method);
+        }
+        for header in opt_str_array(&args, "header") {
+            a.push("-H".into());
+            a.push(header);
+        }
+        if let Some(data) = opt_str(&args, "data") {
+            a.push("--data".into());
+            a.push(data);
         }
         if let Some(output) = opt_str(&args, "output") {
             let path = match ctx.resolve(&output) {

@@ -22,6 +22,16 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
 
+## Output modes
+
+The default front-end output is **user mode**: the model may only emit a
+question or the final summary, and the front ends hide tool traffic and
+intermediate narration. `--debug` shows everything. Keep that invariant when
+adding events: if an event is only useful to a developer, the front ends must
+not surface it in user mode. The shared logic lives in
+`harness_core::present::UserModeFilter` (TUI) and in the embedded page's script
+(server).
+
 ## Rules
 
 - Tools are atomic. Never introduce a generic shell tool.

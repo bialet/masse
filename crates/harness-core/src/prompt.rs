@@ -34,7 +34,8 @@ How to work:
 - Validate every change: `bialet_validate` for syntax, `bialet_test` for the
   suite, `bialet_run` to try code, `bialet_server_start` + `bialet_log_read` to
   preview and debug, and `bialet_docs` for anything you are unsure about.
-- Keep the user informed with short, concrete messages about what you are doing.
+- Test forms end to end with the `curl` tool: send the same POST body the
+  browser would (`data`) and check the stored result, not only the GET page.
 - When the request is ambiguous, ask instead of guessing.
 - When the user's request is fully satisfied, call the `finish` tool with a
   short summary. That is the explicit "I am done" signal; do not just go quiet
@@ -49,8 +50,13 @@ Bialet essentials (always follow, even without the full guide below):
   shallow; prefer GET parameters over deep paths.
 - HTML is rendered server-side from Wren with inline `{{ ... }}` interpolation,
   styled with a classless framework such as PicoCSS.
+- Inline HTML strings cannot nest the same tag: `<div><div>...</div></div>` is
+  a parse error. Wrap with a different element (`<section>`, `<article>`,
+  `<fieldset>`) instead of reusing the parent's tag.
 - Data access is direct SQL using backtick query literals with `?` placeholders.
   There is no ORM. Values come back as strings: convert with `Num.fromString`.
+- `.first`, `.val` and `.toNum` append `LIMIT 1` on their own. Never write your
+  own `LIMIT 1` for them, or the query becomes `... LIMIT 1 LIMIT 1` and fails.
 - `Request.post(name)` returns null when the key is missing. ALWAYS use
   `|| ""` or a null check before any string operation — this is the number one
   crash cause in Bialet apps.
@@ -59,11 +65,43 @@ Bialet essentials (always follow, even without the full guide below):
   `session.csrfOk`. Only `Session.id`, `Session.name` and `Session.destroy()`
   are static. `Session.get` returns null for a missing key, so guard it exactly
   like `Request.post`.
+- Inside an interpolation a plain string is HTML-escaped. Build markup with an
+  expression or `&&`, never by interpolating a tag into a string.
 - Migrations live in `_migration.wren` (or `_app/migration.wren`), cron in
   `_cron.wren`, the layout in `_app.wren` / `_app/template.wren`. Files starting
   with `_` or `.` are private and never served.
 - Escape user data in HTML (XSS) and always use parameterised queries; never
   build SQL by string concatenation."#;
+
+/// Communication guidance for `--debug`: a developer is watching the full log.
+const DEBUG_COMMS: &str = r#"
+# How to talk to this user (debug mode)
+
+This user is a developer watching the full log — every tool call, every result
+and every message. Work like a pair programmer: send a short message when you
+start a meaningful step, name the files and tools you touch, and explain what
+you found when something fails. Brevity still matters, but transparency matters
+more. Same language as the user.
+"#;
+
+/// Communication guidance for the default mode: the user is not a developer.
+const USER_MODE: &str = r#"
+# Audience: this person is NOT a developer
+
+You are helping someone who does not read code, file names, tool output or
+technical jargon — and who does not want a running commentary.
+
+Write to them ONLY in these two situations:
+1. You need an answer to continue. Ask the question directly, in their own
+   language, offering concrete choices when that helps.
+2. The task is done. Explain in plain language what you built or changed and how
+   to use it. No code, no file paths, no tool names, no internal details.
+
+At every other moment stay silent. Do not announce tools, files, edits or
+progress, and do not narrate your reasoning. The interface hides intermediate
+work in this mode, so anything you say outside those two cases is discarded —
+spend the effort on the result instead. Always answer in the user's language.
+"#;
 
 const PROMPT_TOOL_REFERENCE: &str = r#"Tool reference (names only — full schemas are provided separately):
 - Files: read_file, write_file, edit_file, delete_file
@@ -77,12 +115,18 @@ const PROMPT_TOOL_REFERENCE: &str = r#"Tool reference (names only — full schem
 - Control: finish (call it to declare the task done)
 - Skills: any tool whose name matches a skill discovered in skills/"#;
 
-/// Build the full system prompt: role, tools, Bialet guide, then project context.
-pub fn build_system_prompt(ctx: &ProjectContext) -> String {
+/// Build the full system prompt: role, tools, communication mode, Bialet guide,
+/// then project context.
+///
+/// `debug` selects the audience: `true` is a developer watching the full log,
+/// `false` is the default non-developer mode where the model must stay quiet
+/// except for questions and the final explanation.
+pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
     let mut prompt = String::new();
     prompt.push_str(BASE_PROMPT);
     prompt.push_str("\n\n");
     prompt.push_str(PROMPT_TOOL_REFERENCE);
+    prompt.push_str(if debug { DEBUG_COMMS } else { USER_MODE });
 
     // The Bialet framework guide: a live copy if we found one, else the one
     // embedded in the binary.
@@ -158,25 +202,66 @@ mod tests {
 
     #[test]
     fn embedded_guide_is_present() {
-        let prompt = build_system_prompt(&ProjectContext {
-            root: PathBuf::from("/tmp"),
-            ..Default::default()
-        });
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
         assert!(prompt.contains("Bialet"));
         assert!(prompt.contains("Request.post"));
     }
 
     #[test]
     fn live_guide_takes_precedence() {
-        let prompt = build_system_prompt(&ProjectContext {
-            root: PathBuf::from("/tmp"),
-            framework_prompt: Some(FrameworkPrompt {
-                source: PathBuf::from("/x/prompt-guide.md"),
-                content: "LIVE GUIDE SENTINEL".into(),
-            }),
-            ..Default::default()
-        });
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                framework_prompt: Some(FrameworkPrompt {
+                    source: PathBuf::from("/x/prompt-guide.md"),
+                    content: "LIVE GUIDE SENTINEL".into(),
+                }),
+                ..Default::default()
+            },
+            false,
+        );
         assert!(prompt.contains("LIVE GUIDE SENTINEL"));
         assert!(prompt.contains("/x/prompt-guide.md"));
+    }
+
+    #[test]
+    fn user_mode_forbids_process_narration() {
+        let ctx = ProjectContext {
+            root: PathBuf::from("/tmp"),
+            ..Default::default()
+        };
+        let user = build_system_prompt(&ctx, false);
+        assert!(user.contains("NOT a developer"));
+        assert!(!user.contains("debug mode"));
+    }
+
+    #[test]
+    fn debug_mode_asks_for_a_full_log() {
+        let ctx = ProjectContext {
+            root: PathBuf::from("/tmp"),
+            ..Default::default()
+        };
+        let debug = build_system_prompt(&ctx, true);
+        assert!(debug.contains("debug mode"));
+        assert!(!debug.contains("NOT a developer"));
+    }
+
+    #[test]
+    fn prompt_warns_about_the_known_bialet_pitfalls() {
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(prompt.contains("cannot nest the same tag"));
+        assert!(prompt.contains("LIMIT 1"));
     }
 }

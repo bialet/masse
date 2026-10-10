@@ -33,6 +33,8 @@ pub struct AppState {
     pub root: String,
     /// Path to the human-readable runtime log, if logging is enabled.
     pub log_path: Option<PathBuf>,
+    /// Developer mode: the UI shows the full log. Off by default.
+    pub debug: bool,
 }
 
 /// Bind `addr` and serve until the process is stopped.
@@ -62,8 +64,9 @@ fn tracing_line(line: impl AsRef<str>) {
     println!("[masse] {}", line.as_ref());
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
+async fn index(State(state): State<AppState>) -> Html<String> {
+    let mode = if state.debug { "debug" } else { "user" };
+    Html(INDEX_HTML.replace("__MASSE_MODE__", mode))
 }
 
 async fn health(State(state): State<AppState>) -> Json<JsonValue> {
@@ -73,6 +76,7 @@ async fn health(State(state): State<AppState>) -> Json<JsonValue> {
         "model": state.model,
         "tools": state.tools.len(),
         "root": state.root,
+        "mode": if state.debug { "debug" } else { "user" },
     }))
 }
 
@@ -285,7 +289,7 @@ fn agent_event_json(ev: &AgentEvent) -> JsonValue {
 }
 
 const INDEX_HTML: &str = r#"<!doctype html>
-<html lang="en">
+<html lang="en" data-masse-mode="__MASSE_MODE__">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -309,7 +313,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </style>
 </head>
 <body>
-<header>masse · <span id="status">connecting…</span></header>
+<header>masse · <span id="status">connecting…</span> <span id="mode"></span></header>
 <div id="log"></div>
 <footer>
   <input id="msg" placeholder="Ask masse to do something…" autocomplete="off">
@@ -330,6 +334,18 @@ function append(cls, text) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+const DEBUG = document.documentElement.dataset.masseMode === 'debug';
+document.getElementById('mode').textContent = DEBUG ? '· debug' : '';
+
+// In user mode (the default) the assistant's last message of a turn is held
+// back and shown only when the turn ends, so step-by-step narration and tool
+// noise never appear. In debug mode everything is rendered as it arrives.
+let pending = null;
+
+function flushPending() {
+  if (pending !== null) { append('assistant', 'masse: ' + pending); pending = null; }
+}
+
 function renderSessionEvent(ev) {
   if (ev.event_type === 'user_message') append('user', 'you: ' + ev.output);
   else if (ev.event_type === 'assistant_message' && ev.output.trim())
@@ -339,23 +355,49 @@ function renderSessionEvent(ev) {
     append('result', '  ' + (ev.status === 'ok' ? '✔' : '✘') + ' ' + ev.tool + '\n' + ev.output);
 }
 
+function renderHistoryEvent(ev) {
+  if (DEBUG) { renderSessionEvent(ev); return; }
+  if (ev.event_type === 'user_message') {
+    flushPending();
+    append('user', 'you: ' + ev.output);
+  } else if (ev.event_type === 'assistant_message' && ev.output.trim()) {
+    pending = ev.output;
+  }
+}
+
+function renderLiveEvent(ev) {
+  if (ev.kind === 'assistant_message') {
+    if (DEBUG) append('assistant', 'masse: ' + ev.text);
+    else if (ev.text.trim()) pending = ev.text;
+  } else if (ev.kind === 'user_message') {
+    flushPending();
+  } else if (ev.kind === 'tool_call') {
+    if (DEBUG) append('tool', '  ⚙ ' + ev.name + ' ' + ev.args);
+  } else if (ev.kind === 'tool_result') {
+    if (DEBUG) append('result', '  ' + (ev.status === 'ok' ? '✔' : '✘') + ' ' + ev.name + '\n' + ev.output);
+  } else if (ev.kind === 'retrying') {
+    if (DEBUG) append('tool', '  ↻ retry ' + ev.attempt + '/' + ev.max + ' (' + ev.reason + ')');
+  } else if (ev.kind === 'notice') {
+    if (DEBUG) append('result', '  • ' + ev.message);
+  } else if (ev.kind === 'finished') {
+    if (DEBUG) append(ev.success ? 'assistant' : 'error', (ev.success ? '✔ finished: ' : '✘ failed: ') + ev.summary);
+    else flushPending();
+  } else if (ev.kind === 'turn_finished') {
+    flushPending();
+  } else if (ev.kind === 'error') {
+    pending = null;
+    append('error', 'error: ' + ev.message);
+  }
+}
+
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => { statusEl.textContent = 'connected'; };
   ws.onclose = () => { statusEl.textContent = 'disconnected — reload to retry'; };
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.type === 'history') { msg.events.forEach(renderSessionEvent); }
-    else if (msg.type === 'event') {
-      const ev = msg.event;
-      if (ev.kind === 'assistant_message') append('assistant', 'masse: ' + ev.text);
-      else if (ev.kind === 'tool_call') append('tool', '  ⚙ ' + ev.name + ' ' + ev.args);
-      else if (ev.kind === 'tool_result') append('result', '  ' + (ev.status === 'ok' ? '✔' : '✘') + ' ' + ev.name + '\n' + ev.output);
-      else if (ev.kind === 'retrying') append('tool', '  ↻ retry ' + ev.attempt + '/' + ev.max + ' (' + ev.reason + ')');
-      else if (ev.kind === 'notice') append('result', '  • ' + ev.message);
-      else if (ev.kind === 'finished') append(ev.success ? 'assistant' : 'error', (ev.success ? '✔ finished: ' : '✘ failed: ') + ev.summary);
-      else if (ev.kind === 'error') append('error', 'error: ' + ev.message);
-    }
+    if (msg.type === 'history') { msg.events.forEach(renderHistoryEvent); flushPending(); }
+    else if (msg.type === 'event') renderLiveEvent(msg.event);
   };
 }
 

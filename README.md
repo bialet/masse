@@ -20,6 +20,19 @@ masse --serve --port 7001   # http://127.0.0.1:7001 (+ ws://…/ws)
 
 If no front-end flag is given, `masse` starts the TUI.
 
+## Output modes
+
+masse is built for people who are **not** developers. By default it runs in
+**user mode**: you see your own messages and, from the assistant, only the
+question it asks when it needs an answer and the plain-language explanation
+when it finishes. Tool calls, results, retries and the assistant's
+step-by-step narration are hidden — in both front ends.
+
+Pass `--debug` for the full developer log: every tool call, every result,
+every intermediate message, plus provider/model/tools/session in the status
+bar. The mode is fixed for the run and the TUI and server respect it. Whatever
+the mode, the complete transcript is always written to `.masse/session.csv`.
+
 ## Philosophy: atomic tools, no shell
 
 Every tool does exactly one thing. **There is no generic shell tool.** Tools
@@ -47,7 +60,7 @@ default, configurable per call (`timeout_secs`) or globally (`--timeout`).
 | Git (CLI) | `git_status`, `git_diff`, `git_log`, `git_commit`, `git_branch`, `git_stage`, `git_push` |
 | SQLite (CLI) | `sqlite_query`, `sqlite_execute` (invoke `sqlite3`) |
 | Bialet (CLI) | `bialet_run`, `bialet_validate`, `bialet_test`, `bialet_server_start`, `bialet_server_stop`, `bialet_log_read`, `bialet_docs` |
-| Web (CLI) | `curl` |
+| Web (CLI) | `curl` (GET, or POST bodies via `data` + `header`) |
 | Control | `finish` (the model calls it to declare the task done) |
 | Skills (dynamic) | one tool per `skills/<name>/SKILL.md` |
 
@@ -183,6 +196,8 @@ file.
 | `--prompt-file` | `MASSE_PROMPT_FILE` | — | Extra initial prompt appended on top of the Bialet guide |
 | `--max-iterations` | — | `50` | Tool-call iterations per turn; on reaching the cap the agent asks for a final answer without tools |
 | `--no-auto-commit` | — | — | Disable the automatic git commit after every turn |
+| `--auto-push` | `MASSE_AUTO_PUSH` | — | After each auto-commit, run `git push origin HEAD` |
+| `--debug` | `MASSE_DEBUG` | — | Developer mode: show the full log (default is user mode) |
 | `--max-retries` | — | `3` | Retries per model call for transient errors (`0` disables) |
 | `--retry-delay-ms` | — | `800` | Base delay for the retry backoff |
 | `--temperature` | — | `0.2` | Sampling temperature |

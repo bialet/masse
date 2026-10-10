@@ -100,6 +100,11 @@ struct Cli {
     #[arg(long, env = "MASSE_AUTO_PUSH")]
     auto_push: bool,
 
+    /// Developer mode: show the full log (tool calls, results, retries). Off by
+    /// default, where only the messages a non-developer needs are shown.
+    #[arg(long, env = "MASSE_DEBUG")]
+    debug: bool,
+
     /// Sampling temperature.
     #[arg(long, default_value_t = 0.2)]
     temperature: f32,
@@ -196,7 +201,7 @@ async fn run() -> Result<()> {
         ))
     };
 
-    let mut system_prompt = build_system_prompt(&project);
+    let mut system_prompt = build_system_prompt(&project, cli.debug);
     if let Some(path) = &cli.prompt_file {
         let resolved = if path.is_absolute() {
             path.clone()
@@ -269,6 +274,7 @@ async fn run() -> Result<()> {
             tool_count: tool_names.len(),
             history,
             root: root.display().to_string(),
+            debug: cli.debug,
         };
         harness_tui::run(tui_config, handle.clone()).await
     } else {
@@ -291,6 +297,7 @@ async fn run() -> Result<()> {
             model: cli.model.clone(),
             root: root.display().to_string(),
             log_path: Some(runtime_log.clone()),
+            debug: cli.debug,
         };
         harness_server::serve(state, addr).await
     };
@@ -346,6 +353,14 @@ fn print_config(
             "on (git push origin HEAD)"
         } else {
             "off"
+        }
+    );
+    println!(
+        "mode           : {}",
+        if cli.debug {
+            "debug (full log)"
+        } else {
+            "user (questions and final summary only)"
         }
     );
     match &cli.prompt_file {

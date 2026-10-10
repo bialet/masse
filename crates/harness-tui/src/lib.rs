@@ -13,7 +13,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use harness_core::{AgentEvent, AgentHandle};
+use harness_core::{AgentEvent, AgentHandle, Shown, UserModeFilter};
 use harness_session::Event as SessionEvent;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -34,6 +34,9 @@ pub struct TuiConfig {
     pub tool_count: usize,
     pub history: Vec<SessionEvent>,
     pub root: String,
+    /// Developer mode (`--debug`): show the full log. When false (the default),
+    /// only show what a non-developer needs.
+    pub debug: bool,
 }
 
 struct App {
@@ -47,6 +50,8 @@ struct App {
     should_quit: bool,
     input_history: Vec<String>,
     history_cursor: Option<usize>,
+    debug: bool,
+    filter: UserModeFilter,
 }
 
 impl App {
@@ -62,55 +67,89 @@ impl App {
             should_quit: false,
             input_history: Vec::new(),
             history_cursor: None,
+            debug: config.debug,
+            filter: UserModeFilter::new(),
         };
         app.ingest_history(&config.history);
         app
     }
 
+    /// Replay the session log. In developer mode this is the raw transcript; in
+    /// user mode it is collapsed to the relevant messages.
     fn ingest_history(&mut self, history: &[SessionEvent]) {
         for ev in history {
-            match ev.event_type.as_str() {
-                "user_message" => {
-                    self.push_line(label("you", Color::Cyan), &ev.output);
-                }
-                "assistant_message" => {
-                    if !ev.output.trim().is_empty() {
-                        self.push_line(label("masse", Color::Green), &ev.output);
-                    }
-                }
-                "tool_call" => {
-                    self.push_line(
-                        Span::styled(
-                            format!("  ⚙ {}", ev.tool),
-                            Style::default().fg(Color::Yellow),
-                        ),
-                        &ev.args,
-                    );
-                }
-                "tool_result" => {
-                    let ok = ev.status == "ok";
-                    let (mark, color) = if ok {
-                        ("✔", Color::Green)
-                    } else {
-                        ("✘", Color::Red)
-                    };
-                    let header = format!(
-                        "  {mark} {} (exit {})",
-                        ev.tool,
-                        if ev.exit_code.is_empty() {
-                            "-"
-                        } else {
-                            &ev.exit_code
-                        }
-                    );
-                    self.push_line(Span::styled(header, Style::default().fg(color)), &ev.output);
-                }
-                "session_start" | "session_end" => {}
-                _ => {}
+            if self.debug {
+                self.ingest_history_event(ev);
+            } else if let Some(shown) = self.filter.on_session(ev) {
+                self.render_shown(shown);
             }
         }
-        if !history.is_empty() {
+        if !self.debug {
+            if let Some(shown) = self.filter.flush() {
+                self.render_shown(shown);
+            }
+        }
+        if !history.is_empty() && self.debug {
             self.push_plain("── session restored from session.csv ──", Color::DarkGray);
+        }
+    }
+
+    fn ingest_history_event(&mut self, ev: &SessionEvent) {
+        match ev.event_type.as_str() {
+            "user_message" => {
+                self.push_line(label("you", Color::Cyan), &ev.output);
+            }
+            "assistant_message" => {
+                if !ev.output.trim().is_empty() {
+                    self.push_line(label("masse", Color::Green), &ev.output);
+                }
+            }
+            "tool_call" => {
+                self.push_line(
+                    Span::styled(
+                        format!("  ⚙ {}", ev.tool),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    &ev.args,
+                );
+            }
+            "tool_result" => {
+                let ok = ev.status == "ok";
+                let (mark, color) = if ok {
+                    ("✔", Color::Green)
+                } else {
+                    ("✘", Color::Red)
+                };
+                let header = format!(
+                    "  {mark} {} (exit {})",
+                    ev.tool,
+                    if ev.exit_code.is_empty() {
+                        "-"
+                    } else {
+                        &ev.exit_code
+                    }
+                );
+                self.push_line(Span::styled(header, Style::default().fg(color)), &ev.output);
+            }
+            "session_start" | "session_end" => {}
+            _ => {}
+        }
+    }
+
+    /// Render one filter-approved message. Used in user mode.
+    fn render_shown(&mut self, shown: Shown) {
+        match shown {
+            Shown::User(text) => self.push_line(label("you", Color::Cyan), &text),
+            Shown::Assistant(text) => self.push_line(label("masse", Color::Green), &text),
+            Shown::Error(message) => self.push_plain(format!("⚠ {message}"), Color::Red),
+            Shown::Finished { summary, success } => {
+                let (mark, color) = if success {
+                    ("✔", Color::Green)
+                } else {
+                    ("✘", Color::Red)
+                };
+                self.push_plain(format!("{mark} {summary}"), color);
+            }
         }
     }
 
@@ -148,15 +187,53 @@ impl App {
     }
 
     fn on_agent_event(&mut self, event: AgentEvent) {
+        if self.debug {
+            self.push_developer_event(&event);
+        } else if let Some(shown) = self.filter.on_agent(&event) {
+            // `submit` already echoed the user's own line; only the assistant's
+            // (and errors) need rendering here.
+            if !matches!(shown, Shown::User(_)) {
+                self.render_shown(shown);
+            }
+        }
+        self.apply_status(&event);
+        self.trim();
+        self.scroll_back = 0;
+    }
+
+    /// Update the status line and running flag from an event, in both modes.
+    fn apply_status(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::Retrying { attempt, max, .. } => {
+                self.status = format!("retrying {attempt}/{max}");
+            }
+            AgentEvent::Finished { success, .. } => {
+                self.status = if *success { "done" } else { "failed" }.into();
+                self.running = false;
+            }
+            AgentEvent::Error(_) => {
+                self.status = "error".into();
+                self.running = false;
+            }
+            AgentEvent::TurnFinished => {
+                self.running = false;
+                self.status = "ready".into();
+            }
+            _ => {}
+        }
+    }
+
+    /// Push every event into the transcript. Used in developer mode.
+    fn push_developer_event(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::UserMessage(_) => {}
             AgentEvent::AssistantMessage(text) => {
-                self.push_line(label("masse", Color::Green), &text);
+                self.push_line(label("masse", Color::Green), text);
             }
             AgentEvent::ToolCall { name, args } => {
                 self.push_line(
                     Span::styled(format!("  ⚙ {name}"), Style::default().fg(Color::Yellow)),
-                    &args,
+                    args,
                 );
             }
             AgentEvent::ToolResult {
@@ -177,7 +254,7 @@ impl App {
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "-".into())
                 );
-                self.push_line(Span::styled(header, Style::default().fg(color)), &output);
+                self.push_line(Span::styled(header, Style::default().fg(color)), output);
             }
             AgentEvent::Retrying {
                 attempt,
@@ -185,33 +262,23 @@ impl App {
                 reason,
             } => {
                 self.push_plain(format!("↻ retry {attempt}/{max}: {reason}"), Color::Yellow);
-                self.status = format!("retrying {attempt}/{max}");
             }
             AgentEvent::Notice(message) => {
                 self.push_plain(format!("• {message}"), Color::DarkGray);
             }
             AgentEvent::Finished { summary, success } => {
-                let (mark, color, status) = if success {
-                    ("✔", Color::Green, "done")
+                let (mark, color) = if *success {
+                    ("✔", Color::Green)
                 } else {
-                    ("✘", Color::Red, "failed")
+                    ("✘", Color::Red)
                 };
                 self.push_plain(format!("{mark} finished: {summary}"), color);
-                self.status = status.into();
-                self.running = false;
             }
             AgentEvent::Error(message) => {
                 self.push_plain(format!("error: {message}"), Color::Red);
-                self.status = "error".into();
-                self.running = false;
             }
-            AgentEvent::TurnFinished => {
-                self.running = false;
-                self.status = "ready".into();
-            }
+            AgentEvent::TurnFinished => {}
         }
-        self.trim();
-        self.scroll_back = 0;
     }
 
     fn submit(&mut self, handle: &AgentHandle) {
@@ -433,11 +500,16 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
     let max_scroll = total_visual.saturating_sub(inner_height);
     let scroll = max_scroll.saturating_sub(app.scroll_back as usize) as u16;
 
+    let transcript_title = if app.debug {
+        format!(" masse · {} ", config.root)
+    } else {
+        " masse ".to_string()
+    };
     let transcript = Paragraph::new(app.lines.clone())
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" masse · {} ", config.root))
+                .title(transcript_title)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
         .wrap(Wrap { trim: false })
@@ -476,33 +548,33 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
     } else {
         "·"
     };
-    let status = Line::from(vec![
-        Span::styled(
-            format!(" {spinner} {} ", app.status),
-            Style::default().fg(if app.running {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
-        ),
-        Span::styled(
+    let mut status_spans = vec![Span::styled(
+        format!(" {spinner} {} ", app.status),
+        Style::default().fg(if app.running {
+            Color::Yellow
+        } else {
+            Color::Green
+        }),
+    )];
+    if app.debug {
+        status_spans.push(Span::styled(
             format!("| {} / {} ", config.provider_name, config.model),
             Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
+        ));
+        status_spans.push(Span::styled(
             format!("| {} tools ", config.tool_count),
             Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
+        ));
+        status_spans.push(Span::styled(
             format!("| {} ", config.session_path),
             Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
+        ));
+        status_spans.push(Span::styled(
             format!("| scroll {} ", scroll),
             Style::default().fg(Color::DarkGray),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(status), chunks[2]);
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(status_spans)), chunks[2]);
 }
 
 fn visual_lines(width: usize, inner: usize) -> usize {
@@ -547,5 +619,88 @@ mod tests {
     #[test]
     fn input_box_never_shrinks_below_one_row() {
         assert_eq!(input_box_rows(0, 1, 0), (1, 0));
+    }
+
+    fn app(debug: bool) -> App {
+        App::new(&TuiConfig {
+            debug,
+            ..Default::default()
+        })
+    }
+
+    fn transcript(app: &App) -> String {
+        app.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn user_mode_keeps_only_the_final_message_and_hides_tools() {
+        let mut app = app(false);
+        app.on_agent_event(AgentEvent::AssistantMessage("paso 1".into()));
+        app.on_agent_event(AgentEvent::ToolCall {
+            name: "read_file".into(),
+            args: "{}".into(),
+        });
+        app.on_agent_event(AgentEvent::AssistantMessage("listo, quedó andando".into()));
+        app.on_agent_event(AgentEvent::TurnFinished);
+        let text = transcript(&app);
+        assert!(text.contains("listo, quedó andando"));
+        assert!(!text.contains("paso 1"));
+        assert!(!text.contains("read_file"));
+    }
+
+    #[test]
+    fn debug_mode_keeps_everything() {
+        let mut app = app(true);
+        app.on_agent_event(AgentEvent::AssistantMessage("paso 1".into()));
+        app.on_agent_event(AgentEvent::ToolCall {
+            name: "read_file".into(),
+            args: "{}".into(),
+        });
+        app.on_agent_event(AgentEvent::AssistantMessage("listo".into()));
+        let text = transcript(&app);
+        assert!(text.contains("paso 1"));
+        assert!(text.contains("read_file"));
+        assert!(text.contains("listo"));
+    }
+
+    #[test]
+    fn user_mode_replays_history_as_questions_and_summaries() {
+        let mut app = app(false);
+        app.ingest_history(&[
+            SessionEvent {
+                event_type: "user_message".into(),
+                output: "quiero una app".into(),
+                ..Default::default()
+            },
+            SessionEvent {
+                event_type: "assistant_message".into(),
+                output: "Voy a revisar...".into(),
+                ..Default::default()
+            },
+            SessionEvent {
+                event_type: "tool_call".into(),
+                tool: "read_file".into(),
+                ..Default::default()
+            },
+            SessionEvent {
+                event_type: "assistant_message".into(),
+                output: "¿Preferís A o B?".into(),
+                ..Default::default()
+            },
+        ]);
+        let text = transcript(&app);
+        assert!(text.contains("quiero una app"));
+        assert!(text.contains("¿Preferís A o B?"));
+        assert!(!text.contains("Voy a revisar"));
+        assert!(!text.contains("read_file"));
     }
 }
