@@ -46,6 +46,11 @@ not surface it in user mode. The shared logic lives in
   without a passing test (`mutates_wren` + `VERIFY_BEFORE_FINISH` in
   `harness-core/src/agent.rs`); keep it one-shot and question-aware.
 - Keep `ToolResult::from_cmd` honest: a non-zero exit is an error, not `ok`.
+- Break tool-call loops: three identical consecutive calls are skipped with a
+  nudge (`last_call`/`repeat_count` in `harness-core/src/agent.rs`).
+- Background servers are spawned with `process_group(0)` and killed by group
+  (`harness-tools/src/process.rs`); Bialet forks a worker that survives a plain
+  child kill and would keep the port.
 - Prefer small, focused changes and keep the crates compiling independently.
 
 ## Style

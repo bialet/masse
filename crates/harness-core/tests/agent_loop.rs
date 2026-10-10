@@ -560,6 +560,73 @@ async fn finish_after_a_wren_change_is_nudged_once_then_allowed() {
 }
 
 #[tokio::test]
+async fn identical_repeated_calls_are_skipped() {
+    let root = std::env::temp_dir().join(format!("masse-repeat-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(RepeatingProvider {
+        calls: calls.clone(),
+    });
+    let mut agent = build_agent(provider, &root).await;
+    let (tx, mut rx) = broadcast::channel(256);
+
+    let reply = agent.send("go", Some(&tx)).await.unwrap();
+    assert_eq!(reply, "stopped");
+
+    let events = agent.session().read_all().await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.event_type == "tool_result" && e.output.contains("skipped by the harness")),
+        "the third identical call must be skipped"
+    );
+
+    let mut saw_notice = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Notice(message) = event {
+            if message.contains("skipping") {
+                saw_notice = true;
+            }
+        }
+    }
+    assert!(saw_notice, "a Notice must be emitted when a loop is broken");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A provider that issues the same tool call over and over, then stops.
+struct RepeatingProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for RepeatingProvider {
+    fn name(&self) -> &str {
+        "repeating"
+    }
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < 4 {
+            Ok(ChatResponse {
+                tool_calls: vec![ToolCall {
+                    id: format!("c{n}"),
+                    name: "list_dir".into(),
+                    arguments: "{}".into(),
+                }],
+                ..Default::default()
+            })
+        } else {
+            Ok(ChatResponse {
+                content: "stopped".into(),
+                ..Default::default()
+            })
+        }
+    }
+}
+
+#[tokio::test]
 async fn auto_commit_commits_after_a_turn() {
     let git_ok = std::process::Command::new("git")
         .arg("--version")

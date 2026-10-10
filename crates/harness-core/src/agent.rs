@@ -7,7 +7,7 @@ use anyhow::Result;
 use futures::FutureExt;
 use harness_session::{encode_json_args, Event, SessionStore, Status as SessionStatus};
 use harness_tools::cli::{run as run_cmd, CmdSpec};
-use harness_tools::{ToolContext, ToolRegistry, ToolStatus};
+use harness_tools::{ToolContext, ToolRegistry, ToolResult, ToolStatus};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::message::ChatMessage;
@@ -346,6 +346,10 @@ impl Agent {
         // green test run, and have we already nudged once this turn?
         let mut wren_changed = false;
         let mut verify_nudged = false;
+        // Repeated-call detection: the last call signature and how many times in
+        // a row it has been issued.
+        let mut last_call: Option<String> = None;
+        let mut repeat_count: u32 = 0;
 
         for _ in 0..self.config.max_iterations {
             let request = ChatRequest {
@@ -406,6 +410,16 @@ impl Agent {
             }
 
             for call in calls {
+                // Break tool-call loops: the same call with identical arguments
+                // three times in a row cannot produce a new result.
+                let signature = format!("{}\u{1}{}", call.name, call.arguments);
+                if last_call.as_deref() == Some(signature.as_str()) {
+                    repeat_count += 1;
+                } else {
+                    repeat_count = 1;
+                    last_call = Some(signature);
+                }
+
                 let args_value: serde_json::Value =
                     serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
                 let args_encoded = encode_json_args(&args_value);
@@ -419,7 +433,18 @@ impl Agent {
                     .append(&Event::tool_call(&call.name, &args_encoded))
                     .await?;
 
-                let result = self.tools.call(&call.name, &self.ctx, args_value).await;
+                let result = if repeat_count >= 3 {
+                    emit!(AgentEvent::Notice(format!(
+                        "skipping `{}`: identical call repeated {repeat_count} times",
+                        call.name
+                    )));
+                    ToolResult::err(format!(
+                        "skipped by the harness: `{}` was already called {repeat_count} times in a row with identical arguments, so the result cannot change. Do not repeat it — change your approach, or explain to the user what is blocking you.",
+                        call.name
+                    ))
+                } else {
+                    self.tools.call(&call.name, &self.ctx, args_value).await
+                };
                 let terminate = result.terminate.clone();
                 let session_status = if result.status == ToolStatus::Ok {
                     SessionStatus::Ok

@@ -13,6 +13,30 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 
+#[cfg(unix)]
+const SIGTERM: i32 = libc::SIGTERM;
+#[cfg(unix)]
+const SIGKILL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const SIGTERM: i32 = 15;
+#[cfg(not(unix))]
+const SIGKILL: i32 = 9;
+
+/// Signal a whole process group.
+///
+/// Background servers are spawned as their own group leader
+/// (`process_group(0)`), so the negative pid reaches the worker Bialet forks.
+/// Killing only the direct child used to leave that worker holding the port.
+fn signal_group(pid: u32, signal: i32) {
+    #[cfg(unix)]
+    // Safety: `kill` is a plain syscall; a missing group just returns an error.
+    unsafe {
+        libc::kill(-(pid as i32), signal);
+    }
+    #[cfg(not(unix))]
+    let _ = (pid, signal);
+}
+
 /// A running background process.
 struct Managed {
     child: Child,
@@ -73,6 +97,9 @@ impl ProcessRegistry {
             .current_dir(cwd)
             .stdin(Stdio::null())
             .kill_on_drop(false);
+        // Own process group, so `signal_group` can take the workers with it.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         if let Some(path) = log_file {
             if let Some(parent) = path.parent() {
@@ -119,9 +146,17 @@ impl ProcessRegistry {
         let Some(mut managed) = guard.procs.remove(key) else {
             return false;
         };
+        let pid = managed.pid;
+        if let Some(pid) = pid {
+            signal_group(pid, SIGTERM);
+        }
         let _ = managed.child.start_kill();
-        // Give it a moment to die, then wait so the PID is reaped.
+        // Give the group a moment to die, then wait so the PID is reaped.
         let _ = tokio::time::timeout(Duration::from_secs(5), managed.child.wait()).await;
+        if let Some(pid) = pid {
+            // Backstop for a worker that ignored the signal or outlived its parent.
+            signal_group(pid, SIGKILL);
+        }
         true
     }
 
@@ -157,8 +192,14 @@ impl ProcessRegistry {
     pub async fn stop_all(&self) {
         let mut guard = self.inner.lock().await;
         for (_, mut m) in guard.procs.drain() {
+            if let Some(pid) = m.pid {
+                signal_group(pid, SIGTERM);
+            }
             let _ = m.child.start_kill();
             let _ = tokio::time::timeout(Duration::from_secs(3), m.child.wait()).await;
+            if let Some(pid) = m.pid {
+                signal_group(pid, SIGKILL);
+            }
         }
     }
 }

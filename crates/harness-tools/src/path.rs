@@ -9,8 +9,13 @@ use std::path::{Component, Path, PathBuf};
 /// `root`. Symlinks are *not* followed here for the containment check, so a
 /// symlink pointing outside the project is still rejected by [`verify_exists_within`].
 pub fn resolve_within(root: &Path, user: &str) -> Result<PathBuf, String> {
+    // Normalize the root too: it can legitimately contain `..` (for example a
+    // docs directory discovered as `../bialet/docs`). Comparing a normalized
+    // candidate against a non-normalized root made every child path look like
+    // an escape.
+    let root = normalize(root);
     if user.trim().is_empty() {
-        return Ok(root.to_path_buf());
+        return Ok(root);
     }
     let raw = Path::new(user);
     let joined = if raw.is_absolute() {
@@ -19,7 +24,7 @@ pub fn resolve_within(root: &Path, user: &str) -> Result<PathBuf, String> {
         root.join(raw)
     };
     let normalized = normalize(&joined);
-    if normalized == root || normalized.starts_with(root) {
+    if normalized == root || normalized.starts_with(&root) {
         Ok(normalized)
     } else {
         Err(format!(
@@ -85,5 +90,23 @@ mod tests {
             resolve_within(root, "src/../lib.rs").unwrap(),
             PathBuf::from("/home/user/project/lib.rs")
         );
+    }
+
+    #[test]
+    fn a_root_that_contains_dotdot_still_contains_its_children() {
+        // The docs directory is often detected as `../bialet/docs`, so the root
+        // handed to the resolver carries a `..` of its own.
+        let root = Path::new("/home/user/app/../shared/docs");
+        assert_eq!(
+            resolve_within(root, "tests.md").unwrap(),
+            PathBuf::from("/home/user/shared/docs/tests.md")
+        );
+        // The empty path resolves to the normalized root, not the raw one.
+        assert_eq!(
+            resolve_within(root, "").unwrap(),
+            PathBuf::from("/home/user/shared/docs")
+        );
+        // And a real escape from that root is still rejected.
+        assert!(resolve_within(root, "../../secrets").is_err());
     }
 }

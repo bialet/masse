@@ -267,17 +267,23 @@ async fn bialet_validate_quiet_and_server_lifecycle() {
     let r = reg.call("bialet_log_read", &ctx, json!({})).await;
     assert!(!r.is_error(), "{}", r.output);
 
-    // A second server on the same port must be reported as a failure, not as a
-    // bogus success.
+    // A second server on a busy port must not fail: it moves to a free port and
+    // says so. Hold the port open so the situation is deterministic.
+    let busy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let busy_port = busy.local_addr().unwrap().port() as u64;
     let r = reg
         .call(
             "bialet_server_start",
             &ctx,
-            json!({"port": port, "name": "dup"}),
+            json!({"port": busy_port, "name": "dup"}),
         )
         .await;
-    assert!(r.is_error(), "duplicate bind should fail: {}", r.output);
-    assert!(r.output.contains("exited immediately"), "{}", r.output);
+    assert!(!r.is_error(), "busy port should fall back: {}", r.output);
+    assert!(
+        r.output.contains("was busy"),
+        "the result must mention the busy port: {}",
+        r.output
+    );
 
     let r = reg
         .call("bialet_server_stop", &ctx, json!({"all": true}))

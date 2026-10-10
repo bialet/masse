@@ -47,6 +47,19 @@ Failing external commands — a red `bialet_validate`, `bialet_test`, `sqlite3`,
 and so on — are reported with `status: error`, not `ok`, so the model and the
 session log get a real red signal instead of prose to interpret.
 
+## Safety nets
+
+Two guards keep a turn from spiralling:
+
+- **Repeated calls are cut off.** Three identical consecutive tool calls (same
+  name and arguments) cannot produce a new result, so the third is skipped with
+  a tool result that tells the model to change approach.
+- **Servers are killed by process group.** A Bialet server forks a worker;
+  killing only the parent left that worker holding the port (a leaked server
+  looks like "port already in use"). Background servers are spawned as their
+  own process group and the whole group is signalled on stop, and
+  `bialet_server_start` takes a free port when the requested one is busy.
+
 ## Philosophy: atomic tools, no shell
 
 Every tool does exactly one thing. **There is no generic shell tool.** Tools
@@ -85,7 +98,7 @@ Bialet tools map to the framework CLI:
 | `bialet_run` | `bialet -r <code>` |
 | `bialet_validate` | `bialet -t <file>` |
 | `bialet_test` | `bialet -T [dir] [-q]` |
-| `bialet_server_start` | `bialet -p <port> <path>` (background, logs to `.masse/log.txt`) |
+| `bialet_server_start` | `bialet -p <port> <path>` (background, logs to `.masse/log.txt`; falls back to a free port if the requested one is busy) |
 | `bialet_server_stop` | kills the tracked background process |
 | `bialet_log_read` | native read of `.masse/log.txt` (or a given file) |
 | `bialet_docs` | search/read the local Bialet/Wren documentation |

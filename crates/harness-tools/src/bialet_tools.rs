@@ -18,6 +18,19 @@ fn log_path(ctx: &ToolContext) -> PathBuf {
     ctx.root.join(".masse").join("log.txt")
 }
 
+/// True when nothing is listening on `127.0.0.1:port`.
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Ask the OS for a free local port.
+fn free_port() -> Option<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
+}
+
 /// The last `n` lines of a text blob.
 fn tail_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -218,7 +231,15 @@ impl Tool for BialetServerStart {
     }
 
     async fn call(&self, ctx: &ToolContext, args: Json) -> ToolResult {
-        let port = opt_u64(&args, "port").unwrap_or(7001);
+        let requested = opt_u64(&args, "port").unwrap_or(7001).min(u16::MAX as u64) as u16;
+        // A server that cannot bind exits immediately. Leftover servers are
+        // common, so rather than fail, take a free port when the requested one
+        // is taken and report the actual port in the result.
+        let port = if port_is_free(requested) {
+            requested
+        } else {
+            free_port().unwrap_or(requested)
+        };
         let rel = opt_str(&args, "path").unwrap_or_default();
         let app_dir = match ctx.resolve(&rel) {
             Ok(p) => p,
@@ -274,8 +295,13 @@ impl Tool for BialetServerStart {
                         d
                     }
                 };
+                let note = if port != requested {
+                    format!(" (requested port {requested} was busy)")
+                } else {
+                    String::new()
+                };
                 ToolResult::ok(format!(
-                    "started `{} -p {} {}` (pid {pid}); log: {}",
+                    "started `{} -p {} {}` (pid {pid}){note}; log: {}",
                     ctx.bialet_bin,
                     port,
                     shown_dir,
@@ -418,6 +444,11 @@ impl Tool for BialetDocs {
                     "integer",
                     "Maximum matching lines. Default: 60.",
                 ),
+                (
+                    "context",
+                    "integer",
+                    "Lines of surrounding context to show around each match. Default: 2.",
+                ),
             ],
             &[],
         )
@@ -471,6 +502,7 @@ impl Tool for BialetDocs {
         };
         let needle = topic.to_lowercase();
         let max = opt_u64(&args, "max_results").unwrap_or(60) as usize;
+        let context = opt_u64(&args, "context").unwrap_or(2) as usize;
         let mut files = Vec::new();
         collect_docs(&docs, &mut files).await;
         files.sort();
@@ -487,14 +519,28 @@ impl Tool for BialetDocs {
                 .unwrap_or(&file)
                 .display()
                 .to_string();
-            for (i, line) in content.lines().enumerate() {
-                if line.to_lowercase().contains(&needle) {
-                    out.push_str(&format!("{rel}:{}: {}\n", i + 1, line.trim()));
-                    hits += 1;
-                    if hits >= max {
-                        out.push_str(&format!("[masse] truncated at {max} matches\n"));
-                        return ToolResult::ok(out);
-                    }
+            let lines: Vec<&str> = content.lines().collect();
+            let mut printed_upto = 0usize;
+            for (i, line) in lines.iter().enumerate() {
+                if !line.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                hits += 1;
+                // Show a window around the match so the model gets the API in
+                // context, not a bare line it has to guess the shape of.
+                let start = i.saturating_sub(context);
+                let end = (i + context + 1).min(lines.len());
+                if printed_upto > 0 && start > printed_upto {
+                    out.push_str("--\n");
+                }
+                let from = start.max(printed_upto);
+                for (j, l) in lines.iter().enumerate().take(end).skip(from) {
+                    out.push_str(&format!("{rel}:{}: {}\n", j + 1, l.trim_end()));
+                }
+                printed_upto = end;
+                if hits >= max {
+                    out.push_str(&format!("[masse] truncated at {max} matches\n"));
+                    return ToolResult::ok(out);
                 }
             }
         }
@@ -525,5 +571,65 @@ async fn collect_docs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::ToolStatus;
+
+    #[tokio::test]
+    async fn topic_search_includes_context_lines() {
+        let dir = std::env::temp_dir().join(format!("masse-docs-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tests.md"),
+            "intro line\nTest.get(\"/hi\").status(200)\nresult detail here\nother\n",
+        )
+        .unwrap();
+
+        let mut ctx = ToolContext::new(&dir);
+        ctx.docs_dir = Some(dir.clone());
+        let out = BialetDocs
+            .call(&ctx, serde_json::json!({"topic": "Test.get", "context": 1}))
+            .await;
+
+        assert_eq!(out.status, ToolStatus::Ok);
+        assert!(
+            out.output.contains("result detail here"),
+            "context around the match should be shown, got: {}",
+            out.output
+        );
+        assert!(out.output.contains("tests.md:"), "got: {}", out.output);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A docs directory reached through `..` (the sibling-repo case) must be
+    /// readable by `file=`; this failed before the path fix.
+    #[tokio::test]
+    async fn file_mode_reads_a_docs_dir_that_contains_dotdot() {
+        let base = std::env::temp_dir().join(format!("masse-docs-dotdot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let docs = base.join("shared/docs");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("tests.md"), "Test.get(\"/hi\").status(200)\n").unwrap();
+
+        // The docs dir as discovered: `<app>/../shared/docs`.
+        let discovered = app.join("..").join("shared").join("docs");
+        let mut ctx = ToolContext::new(&app);
+        ctx.docs_dir = Some(discovered);
+        let out = BialetDocs
+            .call(&ctx, serde_json::json!({"file": "tests.md"}))
+            .await;
+
+        assert_eq!(out.status, ToolStatus::Ok, "output: {}", out.output);
+        assert!(out.output.contains("Test.get"), "got: {}", out.output);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
