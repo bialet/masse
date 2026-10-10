@@ -397,14 +397,30 @@ fn handle_key(app: &mut App, handle: &AgentHandle, key: KeyEvent) {
 }
 
 fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
+    let area = frame.area();
+
+    // Grow the message box with its content instead of clipping it: measure how
+    // many wrapped rows the input needs and size the box to match. The cap keeps
+    // the transcript visible on short terminals and stops a wall of text from
+    // swallowing the screen.
+    let input_text: String = app.input.iter().collect();
+    let input_inner_width = area.width.saturating_sub(2).max(1) as usize;
+    let max_input_lines = (area.height as usize).saturating_sub(6).clamp(1, 10);
+    let (input_lines, input_first_line) = input_box_rows(
+        input_text.chars().count(),
+        input_inner_width,
+        max_input_lines,
+    );
+    let input_height = input_lines as u16 + 2; // top and bottom borders
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
-        .split(frame.area());
+        .split(area);
 
     // Transcript
     let inner_width = chunks[0].width.saturating_sub(2).max(1) as usize;
@@ -429,7 +445,6 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
     frame.render_widget(transcript, chunks[0]);
 
     // Input
-    let input_text: String = app.input.iter().collect();
     let input = Paragraph::new(input_text)
         .style(Style::default().fg(Color::White))
         .block(
@@ -438,13 +453,21 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
                 .title(" message (Enter to send · Esc cancel · Ctrl-C quit) ")
                 .border_style(Style::default().fg(Color::Blue)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((input_first_line as u16, 0));
     frame.render_widget(input, chunks[1]);
 
-    // Place the real terminal cursor inside the input box.
+    // Place the real terminal cursor inside the input box. The box wraps by
+    // character (see `visual_lines`), so the cursor math matches the height
+    // computation above, including when the text is scrolled up.
+    let cursor = app.cursor.min(app.input.len());
+    let cursor_row = (cursor / input_inner_width).saturating_sub(input_first_line);
+    let cursor_col = (cursor % input_inner_width) as u16;
     let max_x = chunks[1].x + chunks[1].width.saturating_sub(2);
-    let cursor_x = (chunks[1].x + 1 + app.input[..app.cursor].len() as u16).min(max_x);
-    frame.set_cursor_position((cursor_x, chunks[1].y + 1));
+    let cursor_x = (chunks[1].x + 1 + cursor_col).min(max_x);
+    let max_y = chunks[1].y + input_height.saturating_sub(2);
+    let cursor_y = (chunks[1].y + 1 + cursor_row as u16).min(max_y);
+    frame.set_cursor_position((cursor_x, cursor_y));
 
     // Status
     let spinner = if app.running {
@@ -487,4 +510,42 @@ fn visual_lines(width: usize, inner: usize) -> usize {
         return 1;
     }
     (width + inner - 1) / inner.max(1)
+}
+
+/// Rows the message box should show for an input of `input_chars` characters,
+/// and the index of the first visible wrapped row. When the content is taller
+/// than `max_rows`, the box scrolls to the end so the cursor stays in view.
+fn input_box_rows(input_chars: usize, inner_width: usize, max_rows: usize) -> (usize, usize) {
+    let total = visual_lines(input_chars, inner_width).max(1);
+    let visible = total.min(max_rows.max(1));
+    (visible, total - visible)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_box_shows_one_row_when_empty_or_short() {
+        assert_eq!(input_box_rows(0, 10, 10), (1, 0));
+        assert_eq!(input_box_rows(10, 10, 10), (1, 0));
+    }
+
+    #[test]
+    fn input_box_grows_with_wrapped_rows() {
+        // One character over the edge wraps onto a second row.
+        assert_eq!(input_box_rows(11, 10, 10), (2, 0));
+        assert_eq!(input_box_rows(25, 10, 10), (3, 0));
+    }
+
+    #[test]
+    fn input_box_caps_and_scrolls_to_the_end() {
+        // 35 chars on a 10-wide box is 4 rows; a cap of 2 shows the last two.
+        assert_eq!(input_box_rows(35, 10, 2), (2, 2));
+    }
+
+    #[test]
+    fn input_box_never_shrinks_below_one_row() {
+        assert_eq!(input_box_rows(0, 1, 0), (1, 0));
+    }
 }
