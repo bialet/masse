@@ -28,6 +28,12 @@ question it asks when it needs an answer and the plain-language explanation
 when it finishes. Tool calls, results, retries and the assistant's
 step-by-step narration are hidden — in both front ends.
 
+Assistant messages are **Markdown**, and both front ends render it — headings,
+lists, fenced code, blockquotes, tables and inline emphasis, code and links —
+instead of printing the raw source. `harness-core` owns the parser; the TUI
+draws styled terminal lines and the server pre-renders the HTML the page
+injects.
+
 Pass `--debug` for the full developer log: every tool call, every result,
 every intermediate message, plus provider/model/tools/session in the status
 bar. The mode is fixed for the run and the TUI and server respect it. Whatever

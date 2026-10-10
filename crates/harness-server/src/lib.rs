@@ -16,6 +16,7 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
+use harness_core::markdown;
 use harness_core::{AgentEvent, AgentHandle};
 use harness_session::{Event as SessionEvent, SessionStore};
 use harness_tools::ToolRegistry;
@@ -234,6 +235,13 @@ fn parse_client_message(text: &str) -> Option<String> {
 }
 
 fn session_event_json(ev: &SessionEvent) -> JsonValue {
+    // Assistant messages are Markdown; pre-render them so the browser only has
+    // to inject the result. Other event types carry an empty string.
+    let html = if ev.event_type == "assistant_message" {
+        markdown::to_html(&ev.output)
+    } else {
+        String::new()
+    };
     json!({
         "timestamp": ev.timestamp,
         "event_type": ev.event_type,
@@ -242,6 +250,7 @@ fn session_event_json(ev: &SessionEvent) -> JsonValue {
         "args": ev.args,
         "status": ev.status,
         "output": ev.output,
+        "html": html,
         "exit_code": ev.exit_code,
     })
 }
@@ -250,7 +259,7 @@ fn agent_event_json(ev: &AgentEvent) -> JsonValue {
     match ev {
         AgentEvent::UserMessage(text) => json!({ "kind": "user_message", "text": text }),
         AgentEvent::AssistantMessage(text) => {
-            json!({ "kind": "assistant_message", "text": text })
+            json!({ "kind": "assistant_message", "text": text, "html": markdown::to_html(text) })
         }
         AgentEvent::ToolCall { name, args } => {
             json!({ "kind": "tool_call", "name": name, "args": args })
@@ -305,6 +314,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
   #log .tool { color: #d6b45a; }
   #log .error { color: #ff6b6b; }
   #log .result { color: #9aa0a6; }
+  /* Rendered Markdown: block layout instead of the log's pre-wrap. */
+  #log .assistant .who { font-weight: 600; margin-bottom: 2px; }
+  #log .md { white-space: normal; color: #e6e6e6; }
+  #log .md > :first-child { margin-top: 0; }
+  #log .md > :last-child { margin-bottom: 0; }
+  #log .md p { margin: 0.4em 0; }
+  #log .md h1, #log .md h2, #log .md h3,
+  #log .md h4, #log .md h5, #log .md h6 { color: #e6e6e6; line-height: 1.3; margin: 0.6em 0 0.3em; }
+  #log .md h1 { font-size: 1.3em; } #log .md h2 { font-size: 1.15em; }
+  #log .md code { background: #1a1a22; padding: 1px 5px; border-radius: 4px; color: #d6b45a; }
+  #log .md pre { background: #1a1a22; padding: 8px 10px; border-radius: 6px; overflow-x: auto; }
+  #log .md pre code { background: none; padding: 0; color: #e6e6e6; }
+  #log .md ul, #log .md ol { margin: 0.4em 0; padding-left: 1.5em; }
+  #log .md li { margin: 0.1em 0; }
+  #log .md blockquote { border-left: 3px solid #2a2a33; margin: 0.4em 0; padding: 0 0 0 10px; color: #9aa0a6; }
+  #log .md a { color: #7fd1ff; }
+  #log .md hr { border: 0; border-top: 1px solid #2a2a33; margin: 0.6em 0; }
+  #log .md table { border-collapse: collapse; margin: 0.4em 0; }
+  #log .md th, #log .md td { border: 1px solid #2a2a33; padding: 2px 8px; }
+  #log .md img { max-width: 100%; }
   footer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid #2a2a33; }
   input { flex: 1; background: #1a1a22; border: 1px solid #2a2a33; color: #e6e6e6;
           padding: 8px 10px; border-radius: 6px; }
@@ -334,6 +363,20 @@ function append(cls, text) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+function appendHtml(cls, html) {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.innerHTML = html;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// The server renders assistant Markdown to HTML, so the browser only injects
+// the result. The label sits above the rendered block.
+function renderAssistant(html) {
+  appendHtml('assistant', '<div class="who">masse</div><div class="md">' + html + '</div>');
+}
+
 const DEBUG = document.documentElement.dataset.masseMode === 'debug';
 document.getElementById('mode').textContent = DEBUG ? '· debug' : '';
 
@@ -342,14 +385,15 @@ document.getElementById('mode').textContent = DEBUG ? '· debug' : '';
 // noise never appear. In debug mode everything is rendered as it arrives.
 let pending = null;
 
+// `pending` holds the rendered HTML of the assistant's last message.
 function flushPending() {
-  if (pending !== null) { append('assistant', 'masse: ' + pending); pending = null; }
+  if (pending !== null) { renderAssistant(pending); pending = null; }
 }
 
 function renderSessionEvent(ev) {
   if (ev.event_type === 'user_message') append('user', 'you: ' + ev.output);
   else if (ev.event_type === 'assistant_message' && ev.output.trim())
-    append('assistant', 'masse: ' + ev.output);
+    renderAssistant(ev.html);
   else if (ev.event_type === 'tool_call') append('tool', '  ⚙ ' + ev.tool + ' ' + ev.args);
   else if (ev.event_type === 'tool_result')
     append('result', '  ' + (ev.status === 'ok' ? '✔' : '✘') + ' ' + ev.tool + '\n' + ev.output);
@@ -361,14 +405,14 @@ function renderHistoryEvent(ev) {
     flushPending();
     append('user', 'you: ' + ev.output);
   } else if (ev.event_type === 'assistant_message' && ev.output.trim()) {
-    pending = ev.output;
+    pending = ev.html;
   }
 }
 
 function renderLiveEvent(ev) {
   if (ev.kind === 'assistant_message') {
-    if (DEBUG) append('assistant', 'masse: ' + ev.text);
-    else if (ev.text.trim()) pending = ev.text;
+    if (DEBUG) renderAssistant(ev.html);
+    else if (ev.text.trim()) pending = ev.html;
   } else if (ev.kind === 'user_message') {
     flushPending();
   } else if (ev.kind === 'tool_call') {
@@ -414,3 +458,43 @@ connect();
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_events_carry_rendered_html() {
+        let value = agent_event_json(&AgentEvent::AssistantMessage("**hi**".into()));
+        assert_eq!(value["kind"], "assistant_message");
+        assert_eq!(value["text"], "**hi**");
+        assert_eq!(value["html"], "<p><strong>hi</strong></p>");
+    }
+
+    #[test]
+    fn assistant_session_events_carry_rendered_html() {
+        let event = SessionEvent {
+            event_type: "assistant_message".into(),
+            output: "# Title".into(),
+            ..Default::default()
+        };
+        let value = session_event_json(&event);
+        assert_eq!(value["html"], "<h1>Title</h1>");
+    }
+
+    #[test]
+    fn other_events_have_no_html() {
+        let event = SessionEvent {
+            event_type: "user_message".into(),
+            output: "hi".into(),
+            ..Default::default()
+        };
+        assert_eq!(session_event_json(&event)["html"], "");
+    }
+
+    #[test]
+    fn page_ships_the_markdown_renderer() {
+        assert!(INDEX_HTML.contains("renderAssistant"));
+        assert!(INDEX_HTML.contains(".md"));
+    }
+}

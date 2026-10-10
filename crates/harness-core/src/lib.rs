@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod context;
 pub mod error;
+pub mod markdown;
 pub mod message;
 pub mod present;
 pub mod prompt;
@@ -12,6 +13,7 @@ pub mod provider;
 pub use agent::{rebuild_messages, Agent, AgentConfig, AgentEvent, AgentHandle};
 pub use context::ProjectContext;
 pub use error::{CoreError, Result};
+pub use markdown::{Block, Inline};
 pub use message::{ChatMessage, Role, ToolCall};
 pub use present::{Shown, UserModeFilter};
 pub use prompt::build_system_prompt;

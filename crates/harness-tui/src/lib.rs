@@ -13,6 +13,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use harness_core::markdown::{self, Block as MdBlock, Inline};
 use harness_core::{AgentEvent, AgentHandle, Shown, UserModeFilter};
 use harness_session::Event as SessionEvent;
 use ratatui::backend::CrosstermBackend;
@@ -101,7 +102,7 @@ impl App {
             }
             "assistant_message" => {
                 if !ev.output.trim().is_empty() {
-                    self.push_line(label("masse", Color::Green), &ev.output);
+                    self.push_markdown(label("masse", Color::Green), &ev.output);
                 }
             }
             "tool_call" => {
@@ -140,7 +141,7 @@ impl App {
     fn render_shown(&mut self, shown: Shown) {
         match shown {
             Shown::User(text) => self.push_line(label("you", Color::Cyan), &text),
-            Shown::Assistant(text) => self.push_line(label("masse", Color::Green), &text),
+            Shown::Assistant(text) => self.push_markdown(label("masse", Color::Green), &text),
             Shown::Error(message) => self.push_plain(format!("⚠ {message}"), Color::Red),
             Shown::Finished { summary, success } => {
                 let (mark, color) = if success {
@@ -170,6 +171,25 @@ impl App {
             ));
             self.lines.push(Line::from(spans));
         }
+    }
+
+    /// Render a Markdown message. The first visual line carries the `prefix`
+    /// label; continuation lines are indented to line up under it.
+    fn push_markdown(&mut self, prefix: Span<'static>, text: &str) {
+        let mut lines = markdown_lines(&markdown::parse(text));
+        if lines.is_empty() {
+            self.push_line(prefix, text);
+            return;
+        }
+        let mut first = vec![prefix, Span::raw(" ")];
+        first.append(&mut lines[0].spans);
+        lines[0].spans = first;
+        for line in lines.iter_mut().skip(1) {
+            let mut spans = vec![Span::raw("    ")];
+            spans.append(&mut line.spans);
+            line.spans = spans;
+        }
+        self.lines.extend(lines);
     }
 
     fn push_plain(&mut self, text: impl Into<String>, color: Color) {
@@ -228,7 +248,7 @@ impl App {
         match event {
             AgentEvent::UserMessage(_) => {}
             AgentEvent::AssistantMessage(text) => {
-                self.push_line(label("masse", Color::Green), text);
+                self.push_markdown(label("masse", Color::Green), text);
             }
             AgentEvent::ToolCall { name, args } => {
                 self.push_line(
@@ -593,6 +613,176 @@ fn input_box_rows(input_chars: usize, inner_width: usize, max_rows: usize) -> (u
     (visible, total - visible)
 }
 
+/// Render parsed Markdown blocks to styled terminal lines.
+fn markdown_lines(blocks: &[MdBlock]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for block in blocks {
+        push_block(&mut lines, block);
+    }
+    lines
+}
+
+fn push_block(lines: &mut Vec<Line<'static>>, block: &MdBlock) {
+    match block {
+        MdBlock::Heading { level, content } => {
+            let color = match level {
+                1 => Color::LightCyan,
+                2 => Color::LightGreen,
+                _ => Color::LightYellow,
+            };
+            let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+            lines.push(Line::from(inline_spans(content, style)));
+            if *level <= 2 {
+                lines.push(Line::from(Span::styled(
+                    "─".repeat(30),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        MdBlock::Paragraph(content) => {
+            lines.push(Line::from(inline_spans(
+                content,
+                Style::default().fg(Color::Gray),
+            )));
+        }
+        MdBlock::CodeBlock { code, .. } => {
+            for raw in code.split('\n') {
+                lines.push(Line::from(Span::styled(
+                    format!("  {raw}"),
+                    Style::default().fg(Color::LightYellow),
+                )));
+            }
+        }
+        MdBlock::Quote(inner) => {
+            let mut sub = Vec::new();
+            for block in inner {
+                push_block(&mut sub, block);
+            }
+            for mut line in sub {
+                let mut spans = vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
+                spans.append(&mut line.spans);
+                lines.push(Line::from(spans));
+            }
+        }
+        MdBlock::List {
+            ordered,
+            start,
+            items,
+        } => {
+            for (index, item) in items.iter().enumerate() {
+                let marker = if *ordered {
+                    format!("{}. ", start + index as u64)
+                } else {
+                    "• ".to_string()
+                };
+                let mut spans = vec![Span::styled(marker, Style::default().fg(Color::Green))];
+                spans.extend(inline_spans(item, Style::default().fg(Color::Gray)));
+                lines.push(Line::from(spans));
+            }
+        }
+        MdBlock::Rule => {
+            lines.push(Line::from(Span::styled(
+                "─".repeat(40),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        MdBlock::Table { header, rows } => push_table(lines, header, rows),
+    }
+}
+
+fn push_table(lines: &mut Vec<Line<'static>>, header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) {
+    let cols = header.len();
+    let mut widths = vec![0usize; cols];
+    for (c, cell) in header.iter().enumerate() {
+        widths[c] = markdown::inline_text(cell).chars().count();
+    }
+    for row in rows {
+        for (c, cell) in row.iter().enumerate().take(cols) {
+            widths[c] = widths[c].max(markdown::inline_text(cell).chars().count());
+        }
+    }
+
+    let mut header_spans = Vec::new();
+    for (c, cell) in header.iter().enumerate() {
+        if c > 0 {
+            header_spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        }
+        header_spans.extend(inline_spans(
+            cell,
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        header_spans.push(Span::styled(
+            " ".repeat(widths[c].saturating_sub(markdown::inline_text(cell).chars().count())),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    lines.push(Line::from(header_spans));
+
+    let separator = widths
+        .iter()
+        .map(|w| "─".repeat(*w))
+        .collect::<Vec<_>>()
+        .join("─┼─");
+    lines.push(Line::from(Span::styled(
+        separator,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    for row in rows {
+        let mut spans = Vec::new();
+        for (c, width) in widths.iter().enumerate() {
+            if c > 0 {
+                spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+            }
+            let cell = row.get(c);
+            if let Some(cell) = cell {
+                spans.extend(inline_spans(cell, Style::default().fg(Color::Gray)));
+            }
+            let text = cell
+                .map(|cell| markdown::inline_text(cell))
+                .unwrap_or_default();
+            spans.push(Span::styled(
+                " ".repeat(width.saturating_sub(text.chars().count())),
+                Style::default().fg(Color::Gray),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+}
+
+fn inline_spans(inlines: &[Inline], base: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for inline in inlines {
+        match inline {
+            Inline::Text(t) => spans.push(Span::styled(t.clone(), base)),
+            Inline::Code(t) => spans.push(Span::styled(
+                t.clone(),
+                Style::default().fg(Color::LightYellow),
+            )),
+            Inline::Bold(x) => spans.extend(inline_spans(x, base.add_modifier(Modifier::BOLD))),
+            Inline::Italic(x) => spans.extend(inline_spans(x, base.add_modifier(Modifier::ITALIC))),
+            Inline::Strike(x) => {
+                spans.extend(inline_spans(x, base.add_modifier(Modifier::CROSSED_OUT)))
+            }
+            Inline::Link { text, url } => {
+                spans.extend(inline_spans(
+                    text,
+                    base.fg(Color::LightCyan).add_modifier(Modifier::UNDERLINED),
+                ));
+                if markdown::inline_text(text).trim() != url {
+                    spans.push(Span::styled(
+                        format!(" ({url})"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+            }
+        }
+    }
+    spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +860,34 @@ mod tests {
         assert!(text.contains("paso 1"));
         assert!(text.contains("read_file"));
         assert!(text.contains("listo"));
+    }
+
+    #[test]
+    fn assistant_markdown_is_rendered_not_shown_raw() {
+        let mut app = app(false);
+        app.on_agent_event(AgentEvent::AssistantMessage(
+            "# Result\n\nThis is **bold** and `code` here.".into(),
+        ));
+        app.on_agent_event(AgentEvent::TurnFinished);
+        let text = transcript(&app);
+        assert!(text.contains("Result"));
+        assert!(text.contains("bold"));
+        assert!(text.contains("code"));
+        // Markup is consumed, not printed verbatim.
+        assert!(!text.contains("**"));
+        assert!(!text.contains("# Result"));
+    }
+
+    #[test]
+    fn code_blocks_and_lists_render_each_line() {
+        let mut app = app(true);
+        app.on_agent_event(AgentEvent::AssistantMessage(
+            "- one\n- two\n\n```sh\nls -la\n```".into(),
+        ));
+        let text = transcript(&app);
+        assert!(text.contains("• one"));
+        assert!(text.contains("• two"));
+        assert!(text.contains("ls -la"));
     }
 
     #[test]
