@@ -33,6 +33,20 @@ every intermediate message, plus provider/model/tools/session in the status
 bar. The mode is fixed for the run and the TUI and server respect it. Whatever
 the mode, the complete transcript is always written to `.masse/session.csv`.
 
+## Definition of done
+
+masse treats behaviour as unverified until a test says otherwise. After any
+change to a `.wren` file, if the model tries to finish or stop without a
+passing `bialet_test` since that change, the harness nudges it once to write an
+acceptance test, run it, and iterate to green — then it may finish. The nudge
+is one-shot (never a deadlock) and only fires for `.wren` changes, so docs and
+data edits are not held up. A stop that looks like a question is always allowed
+through.
+
+Failing external commands — a red `bialet_validate`, `bialet_test`, `sqlite3`,
+and so on — are reported with `status: error`, not `ok`, so the model and the
+session log get a real red signal instead of prose to interpret.
+
 ## Philosophy: atomic tools, no shell
 
 Every tool does exactly one thing. **There is no generic shell tool.** Tools

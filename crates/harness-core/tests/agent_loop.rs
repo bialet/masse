@@ -420,6 +420,146 @@ async fn iteration_cap_wraps_up_instead_of_failing() {
 }
 
 #[tokio::test]
+async fn a_wren_change_is_nudged_before_the_model_can_stop() {
+    let root = std::env::temp_dir().join(format!("masse-verify-stop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut responses = VecDeque::new();
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path":"app.wren","content":"// app"}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+    // The model tries to stop with a summary right after editing.
+    responses.push_back(ChatResponse {
+        content: "listo, ya está".into(),
+        tool_calls: vec![],
+        finish_reason: Some("stop".into()),
+    });
+    // After the nudge it finishes.
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "c2".into(),
+            name: "finish".into(),
+            arguments: r#"{"summary":"verificado","success":true}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(responses),
+    });
+    let mut agent = build_agent(provider, &root).await;
+    let (tx, mut rx) = broadcast::channel(64);
+
+    let reply = agent.send("cambiá app.wren", Some(&tx)).await.unwrap();
+    assert_eq!(
+        reply, "verificado",
+        "the turn must not end on the first summary after a .wren edit"
+    );
+
+    let mut nudged = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Notice(message) = event {
+            if message.contains("verifying") {
+                nudged = true;
+            }
+        }
+    }
+    assert!(nudged, "a verification Notice must be emitted");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_question_after_a_wren_change_is_not_nudged() {
+    let root = std::env::temp_dir().join(format!("masse-verify-q-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut responses = VecDeque::new();
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path":"app.wren","content":"// app"}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+    responses.push_back(ChatResponse {
+        content: "¿Preferís A o B?".into(),
+        tool_calls: vec![],
+        finish_reason: Some("stop".into()),
+    });
+
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(responses),
+    });
+    let mut agent = build_agent(provider, &root).await;
+
+    let reply = agent.send("cambiá app.wren", None).await.unwrap();
+    assert_eq!(reply, "¿Preferís A o B?");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn finish_after_a_wren_change_is_nudged_once_then_allowed() {
+    let root = std::env::temp_dir().join(format!("masse-verify-finish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut responses = VecDeque::new();
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path":"app.wren","content":"// app"}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "c2".into(),
+            name: "finish".into(),
+            arguments: r#"{"summary":"primero","success":true}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "c3".into(),
+            name: "finish".into(),
+            arguments: r#"{"summary":"segundo","success":true}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(responses),
+    });
+    let mut agent = build_agent(provider, &root).await;
+
+    let reply = agent.send("cambiá app.wren", None).await.unwrap();
+    assert_eq!(
+        reply, "segundo",
+        "the first finish is held back; the second is allowed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn auto_commit_commits_after_a_turn() {
     let git_ok = std::process::Command::new("git")
         .arg("--version")

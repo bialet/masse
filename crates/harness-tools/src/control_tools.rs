@@ -19,7 +19,7 @@ impl Tool for Finish {
     }
 
     fn description(&self) -> &str {
-        "Declare the task complete and stop. Call this exactly once you have fully satisfied the user's request (or shown it is impossible), with a short summary of the result. Do not call it while you still have steps to carry out."
+        "Declare the task complete and stop. Call this once you have fully satisfied the user's request (or shown it is impossible), with a short summary of the result. Before calling it, any behaviour you changed must be verified — for a Bialet app that means a passing `bialet_test`, not just a syntax check. Do not call it while you still have steps to carry out."
     }
 
     fn schema(&self) -> Json {

@@ -41,6 +41,11 @@ not surface it in user mode. The shared logic lives in
 - Keep session persistence append-only and JSON-free.
 - `event_type ∈ {session_start, user_message, assistant_message, tool_call,
   tool_result, session_end}` and `status ∈ {ok, error}`.
+- A `.wren` change is not done until `bialet_test` is green. The agent loop
+  nudges once when the model tries to finish or stop after a `.wren` edit
+  without a passing test (`mutates_wren` + `VERIFY_BEFORE_FINISH` in
+  `harness-core/src/agent.rs`); keep it one-shot and question-aware.
+- Keep `ToolResult::from_cmd` honest: a non-zero exit is an error, not `ok`.
 - Prefer small, focused changes and keep the crates compiling independently.
 
 ## Style

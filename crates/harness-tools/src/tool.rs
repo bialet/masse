@@ -94,8 +94,14 @@ impl ToolResult {
     }
 
     /// Wrap a captured CLI result into a `ToolResult`.
+    ///
+    /// A command that ran but exited non-zero (a failed `bialet_validate`, a
+    /// red `bialet_test`, a `sqlite3` error, ...) is an error, not a success:
+    /// the model needs a real red signal, not just prose to interpret. Tools
+    /// where a non-zero exit is expected (e.g. `grep` finding no matches)
+    /// handle it before calling this.
     pub fn from_cmd(cmd: &CmdOutput) -> Self {
-        let status = if cmd.success() || (cmd.exit_code.is_some() && !cmd.timed_out) {
+        let status = if cmd.success() {
             ToolStatus::Ok
         } else {
             ToolStatus::Error
@@ -239,4 +245,50 @@ pub fn schema_object(properties: &[(&str, &str, &str)], required: &[&str]) -> Js
         "properties": Json::Object(props),
         "required": required,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd(exit_code: Option<i32>, timed_out: bool, error: Option<&str>) -> CmdOutput {
+        CmdOutput {
+            exit_code,
+            timed_out,
+            error: error.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_zero_exit_is_ok() {
+        assert_eq!(
+            ToolResult::from_cmd(&cmd(Some(0), false, None)).status,
+            ToolStatus::Ok
+        );
+    }
+
+    #[test]
+    fn a_non_zero_exit_is_an_error() {
+        assert_eq!(
+            ToolResult::from_cmd(&cmd(Some(1), false, None)).status,
+            ToolStatus::Error
+        );
+        assert_eq!(
+            ToolResult::from_cmd(&cmd(Some(128), false, None)).status,
+            ToolStatus::Error
+        );
+    }
+
+    #[test]
+    fn a_timeout_or_spawn_failure_is_an_error() {
+        assert_eq!(
+            ToolResult::from_cmd(&cmd(None, true, None)).status,
+            ToolStatus::Error
+        );
+        assert_eq!(
+            ToolResult::from_cmd(&cmd(None, false, Some("spawn failed"))).status,
+            ToolStatus::Error
+        );
+    }
 }

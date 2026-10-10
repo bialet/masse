@@ -62,6 +62,33 @@ fn first_line(text: &str, max: usize) -> String {
     }
 }
 
+/// Tools whose `path` argument can point at a `.wren` file we just changed.
+const MUTATING_FILE_TOOLS: [&str; 3] = ["write_file", "edit_file", "delete_file"];
+
+/// True when a tool call changed a `.wren` file, judged from its arguments.
+fn mutates_wren(name: &str, args: &serde_json::Value) -> bool {
+    if !MUTATING_FILE_TOOLS.contains(&name) {
+        return false;
+    }
+    args.get("path")
+        .and_then(|v| v.as_str())
+        .map(|p| p.to_lowercase().ends_with(".wren"))
+        .unwrap_or(false)
+}
+
+/// Does this assistant message look like a question the user must answer?
+/// Used to avoid nagging about tests when the model stopped to ask something.
+fn looks_like_question(text: &str) -> bool {
+    text.contains('?') || text.contains('¿')
+}
+
+/// One-shot nudge injected into the conversation when the model tries to finish
+/// after changing Wren code without running the test suite.
+const VERIFY_BEFORE_FINISH: &str = "Before you finish: you changed Wren files but have not run `bialet_test` (or an equivalent end-to-end check) since the last change. \
+In this harness a behaviour change is not done until it is verified. Add or update an acceptance test under `_tests/` that encodes what the user asked for \
+(for a form: POST the values, then GET the page and assert they were stored), run `bialet_test`, and iterate until it is green. Then finish again. \
+If no test applies here, say why in one line and finish again.";
+
 /// How a turn ended.
 enum TurnOutcome {
     /// The model stopped calling tools on its own.
@@ -315,6 +342,11 @@ impl Agent {
         self.session.append(&Event::user_message(text)).await?;
         self.messages.push(ChatMessage::user(text));
 
+        // Definition-of-done tracking: did we change Wren code since the last
+        // green test run, and have we already nudged once this turn?
+        let mut wren_changed = false;
+        let mut verify_nudged = false;
+
         for _ in 0..self.config.max_iterations {
             let request = ChatRequest {
                 model: self.config.model.clone(),
@@ -360,6 +392,16 @@ impl Agent {
             ));
 
             if calls.is_empty() {
+                // The model stopped on its own. If it just changed Wren code and
+                // is not asking the user a question, make it verify first.
+                if wren_changed && !verify_nudged && !looks_like_question(&response.content) {
+                    verify_nudged = true;
+                    emit!(AgentEvent::Notice(
+                        "verifying the change before finishing".into()
+                    ));
+                    self.messages.push(ChatMessage::user(VERIFY_BEFORE_FINISH));
+                    continue;
+                }
                 return Ok(TurnOutcome::Stopped(response.content));
             }
 
@@ -367,6 +409,7 @@ impl Agent {
                 let args_value: serde_json::Value =
                     serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
                 let args_encoded = encode_json_args(&args_value);
+                let changed_wren = mutates_wren(&call.name, &args_value);
 
                 emit!(AgentEvent::ToolCall {
                     name: call.name.clone(),
@@ -405,8 +448,24 @@ impl Agent {
                     result.output,
                 ));
 
-                // The `finish` tool ends the turn with an explicit outcome.
+                if changed_wren {
+                    wren_changed = true;
+                }
+                if call.name == "bialet_test" && result.status == ToolStatus::Ok {
+                    wren_changed = false;
+                }
+
+                // The `finish` tool ends the turn with an explicit outcome, but
+                // not before we have verified the changes at least once.
                 if let Some(t) = terminate {
+                    if wren_changed && !verify_nudged {
+                        verify_nudged = true;
+                        emit!(AgentEvent::Notice(
+                            "verifying the change before finishing".into()
+                        ));
+                        self.messages.push(ChatMessage::user(VERIFY_BEFORE_FINISH));
+                        break;
+                    }
                     return Ok(TurnOutcome::Finished {
                         summary: t.summary,
                         success: t.success,

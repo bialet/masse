@@ -34,8 +34,16 @@ How to work:
 - Validate every change: `bialet_validate` for syntax, `bialet_test` for the
   suite, `bialet_run` to try code, `bialet_server_start` + `bialet_log_read` to
   preview and debug, and `bialet_docs` for anything you are unsure about.
-- Test forms end to end with the `curl` tool: send the same POST body the
-  browser would (`data`) and check the stored result, not only the GET page.
+- Syntax is the floor, not the goal. For anything that changes what the app
+  does, write the acceptance check first: a test under `_tests/` that encodes
+  the user's request, then run `bialet_test` and iterate until it is green
+  before calling `finish`. The API is fluent (see `bialet_docs` → tests.md),
+  e.g. `Test.post("/event?id=5", {"amount": "100"}).status(302)` followed by
+  `Test.get("/event?id=5").contains("100")`. A form change must assert that
+  POST → read round-trip (submit the values, then read the page back), not just
+  that the page renders.
+- Test by hand too when it helps: the `curl` tool can send the same POST body
+  the browser would (`data`), so check the stored result, not only the GET page.
 - When the request is ambiguous, ask instead of guessing.
 - When the user's request is fully satisfied, call the `finish` tool with a
   short summary. That is the explicit "I am done" signal; do not just go quiet
@@ -263,5 +271,19 @@ mod tests {
         );
         assert!(prompt.contains("cannot nest the same tag"));
         assert!(prompt.contains("LIMIT 1"));
+    }
+
+    #[test]
+    fn prompt_requires_verification_before_finishing() {
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(prompt.contains("acceptance check first"));
+        assert!(prompt.contains("_tests/"));
+        assert!(prompt.contains("bialet_test"));
     }
 }
