@@ -95,6 +95,11 @@ struct Cli {
     #[arg(long)]
     no_auto_commit: bool,
 
+    /// After each auto-commit, `git push origin HEAD` (the remote's hook
+    /// deploys). Ignored when --no-auto-commit is set.
+    #[arg(long, env = "MASSE_AUTO_PUSH")]
+    auto_push: bool,
+
     /// Sampling temperature.
     #[arg(long, default_value_t = 0.2)]
     temperature: f32,
@@ -214,6 +219,7 @@ async fn run() -> Result<()> {
         max_retries: cli.max_retries,
         retry_delay_ms: cli.retry_delay_ms,
         auto_commit: !cli.no_auto_commit,
+        auto_push: cli.auto_push && !cli.no_auto_commit,
         system_prompt,
     };
 
@@ -332,6 +338,14 @@ fn print_config(
             "off"
         } else {
             "on (git init if needed)"
+        }
+    );
+    println!(
+        "auto-push      : {}",
+        if cli.auto_push && !cli.no_auto_commit {
+            "on (git push origin HEAD)"
+        } else {
+            "off"
         }
     );
     match &cli.prompt_file {

@@ -300,3 +300,63 @@ impl Tool for GitStage {
         run_git(ctx, a, timeout).await
     }
 }
+
+// ---------------------------------------------------------------------------
+// git_push
+// ---------------------------------------------------------------------------
+
+pub struct GitPush;
+
+#[async_trait]
+impl Tool for GitPush {
+    fn name(&self) -> &str {
+        "git_push"
+    }
+
+    fn description(&self) -> &str {
+        "Push the current branch to a remote (git push). Pushing to origin \
+         deploys: the remote's post-receive hook builds and releases the app."
+    }
+
+    fn schema(&self) -> Json {
+        schema_object(
+            &[
+                ("remote", "string", "Remote name. Default: origin."),
+                (
+                    "branch",
+                    "string",
+                    "Branch to push. Default: the current branch (HEAD).",
+                ),
+                (
+                    "force",
+                    "boolean",
+                    "Push with --force-with-lease. Default: false.",
+                ),
+                ("timeout_secs", "integer", "Override the default timeout."),
+            ],
+            &[],
+        )
+    }
+
+    async fn call(&self, ctx: &ToolContext, args: Json) -> ToolResult {
+        let remote = opt_str(&args, "remote").unwrap_or_else(|| "origin".into());
+        if remote.starts_with('-') || remote.contains(char::is_whitespace) {
+            return ToolResult::err("invalid remote name");
+        }
+        let mut a = vec!["push".to_string()];
+        if opt_bool(&args, "force", false) {
+            a.push("--force-with-lease".into());
+        }
+        a.push(remote);
+        match opt_str(&args, "branch") {
+            Some(b) => {
+                if b.starts_with('-') || b.contains(char::is_whitespace) {
+                    return ToolResult::err("invalid branch name");
+                }
+                a.push(b);
+            }
+            None => a.push("HEAD".into()),
+        }
+        run_git(ctx, a, opt_u64(&args, "timeout_secs")).await
+    }
+}

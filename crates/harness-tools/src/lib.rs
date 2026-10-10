@@ -51,6 +51,7 @@ pub fn builtin_registry() -> ToolRegistry {
     reg.register(std::sync::Arc::new(git_tools::GitCommit));
     reg.register(std::sync::Arc::new(git_tools::GitBranch));
     reg.register(std::sync::Arc::new(git_tools::GitStage));
+    reg.register(std::sync::Arc::new(git_tools::GitPush));
     // SQLite
     reg.register(std::sync::Arc::new(sqlite_tools::SqliteQuery));
     reg.register(std::sync::Arc::new(sqlite_tools::SqliteExecute));

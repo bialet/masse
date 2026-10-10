@@ -44,7 +44,7 @@ default, configurable per call (`timeout_secs`) or globally (`--timeout`).
 | Files (native) | `read_file`, `write_file`, `edit_file`, `delete_file` |
 | Directories (native) | `create_dir`, `delete_dir`, `list_dir` |
 | Search (CLI) | `grep` (invokes `grep`), `glob` (invokes `find`) |
-| Git (CLI) | `git_status`, `git_diff`, `git_log`, `git_commit`, `git_branch`, `git_stage` |
+| Git (CLI) | `git_status`, `git_diff`, `git_log`, `git_commit`, `git_branch`, `git_stage`, `git_push` |
 | SQLite (CLI) | `sqlite_query`, `sqlite_execute` (invoke `sqlite3`) |
 | Bialet (CLI) | `bialet_run`, `bialet_validate`, `bialet_test`, `bialet_server_start`, `bialet_server_stop`, `bialet_log_read`, `bialet_docs` |
 | Web (CLI) | `curl` |
@@ -137,6 +137,11 @@ configured, so the commit succeeds).
   in `.masse/masse.log`.
 
 Disable it with `--no-auto-commit`.
+
+With **`--auto-push`** (env `MASSE_AUTO_PUSH`), after each commit masse also runs
+`git push origin HEAD`, so pushing the branch deploys on the remote (for
+example, an IZAR app pushing `test` builds the test environment). Requires
+auto-commit; a no-op push is harmless.
 
 ## Architecture
 

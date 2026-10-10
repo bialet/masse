@@ -25,6 +25,9 @@ pub struct AgentConfig {
     pub retry_delay_ms: u64,
     /// Commit the workspace after every turn (and `git init` if needed).
     pub auto_commit: bool,
+    /// After committing, `git push origin HEAD` so the remote deploys. Requires
+    /// `auto_commit`.
+    pub auto_push: bool,
     pub system_prompt: String,
 }
 
@@ -37,6 +40,7 @@ impl Default for AgentConfig {
             max_retries: 3,
             retry_delay_ms: 800,
             auto_commit: false,
+            auto_push: false,
             system_prompt: String::new(),
         }
     }
@@ -273,6 +277,19 @@ impl Agent {
                 Err(e) => {
                     if let Some(s) = sink {
                         let _ = s.send(AgentEvent::Notice(format!("auto-commit failed: {e}")));
+                    }
+                }
+            }
+
+            // Push so the deploy hook fires. A no-op push is harmless.
+            if self.config.auto_push {
+                let push = self.git(&["push", "origin", "HEAD"]).await;
+                if !push.success() {
+                    if let Some(s) = sink {
+                        let _ = s.send(AgentEvent::Notice(format!(
+                            "auto-push failed: {}",
+                            push.to_agent_text()
+                        )));
                     }
                 }
             }
