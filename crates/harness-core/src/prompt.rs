@@ -57,7 +57,8 @@ Bialet essentials (always follow, even without the full guide below):
   path minus `.wren` is its URL; the deepest matching handler wins. Keep routes
   shallow; prefer GET parameters over deep paths.
 - HTML is rendered server-side from Wren with inline `{{ ... }}` interpolation,
-  styled with a classless framework such as PicoCSS.
+  styled with a classless CSS framework such as Beak CSS (loaded from the
+  jsDelivr CDN at `@latest`, with a palette chosen to fit the project).
 - Inline HTML strings cannot nest the same tag: `<div><div>...</div></div>` is
   a parse error. Wrap with a different element (`<section>`, `<article>`,
   `<fieldset>`) instead of reusing the parent's tag.
