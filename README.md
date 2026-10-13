@@ -91,9 +91,9 @@ default, configurable per call (`timeout_secs`) or globally (`--timeout`).
 | Directories (native) | `create_dir`, `delete_dir`, `list_dir` |
 | Search (CLI) | `grep` (invokes `grep`), `glob` (invokes `find`) |
 | Git (CLI) | `git_status`, `git_diff`, `git_log`, `git_commit`, `git_branch`, `git_stage`, `git_push` |
-| SQLite (CLI) | `sqlite_query`, `sqlite_execute` (invoke `sqlite3`) |
+| SQLite (CLI) | `sqlite_query` (read-only), `sqlite_execute` (INSERT/UPDATE/DELETE), `sqlite_schema` (CREATE/ALTER/DROP) — all invoke `sqlite3` |
 | Bialet (CLI) | `bialet_run`, `bialet_validate`, `bialet_test`, `bialet_server_start`, `bialet_server_stop`, `bialet_log_read`, `bialet_docs` |
-| Web (CLI) | `curl` (GET, or POST bodies via `data` + `header`) |
+| Web (CLI) | `curl` (local Bialet server only: loopback + the port opened by `bialet_server_start`; GET, or POST via `data` + `header`) |
 | Control | `finish` (the model calls it to declare the task done) |
 | Skills (dynamic) | one tool per `skills/<name>/SKILL.md` |
 
@@ -107,7 +107,7 @@ Bialet tools map to the framework CLI:
 | `bialet_server_start` | `bialet -p <port> <path>` (background, logs to `.masse/log.txt`; falls back to a free port if the requested one is busy) |
 | `bialet_server_stop` | kills the tracked background process |
 | `bialet_log_read` | native read of `.masse/log.txt` (or a given file) |
-| `bialet_docs` | search/read the local Bialet/Wren documentation |
+| `bialet_docs` | search/read the local Bialet/Wren docs, plus bundled `sqlite.md`, `html.md`, `css.md`, `javascript.md` (local files win on name collisions) |
 
 Background processes started by `bialet_server_start` live **in the runtime
 memory** of masse, never on disk. Restarting masse forgets them; `--tui` and

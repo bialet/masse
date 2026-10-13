@@ -34,6 +34,10 @@ How to work:
 - Validate every change: `bialet_validate` for syntax, `bialet_test` for the
   suite, `bialet_run` to try code, `bialet_server_start` + `bialet_log_read` to
   preview and debug, and `bialet_docs` for anything you are unsure about.
+- The SQLite tools are split by blast radius: `sqlite_query` only reads (it
+  opens the database `-readonly`), `sqlite_execute` changes rows, and
+  `sqlite_schema` changes structure. Schema changes belong in `_migration.wren`
+  so they are reproducible; reach for `sqlite_schema` only to apply one directly.
 - Syntax is the floor, not the goal. For anything that changes what the app
   does, write the acceptance check first: a test under `_tests/` that encodes
   the user's request, then run `bialet_test` and iterate until it is green
@@ -42,8 +46,11 @@ How to work:
   `Test.get("/event?id=5").contains("100")`. A form change must assert that
   POST → read round-trip (submit the values, then read the page back), not just
   that the page renders.
-- Test by hand too when it helps: the `curl` tool can send the same POST body
-  the browser would (`data`), so check the stored result, not only the GET page.
+- Test by hand too when it helps: the `curl` tool posts to the local Bialet
+  server started by `bialet_server_start` (it accepts the same `data` body the
+  browser would). It is confined to that server's loopback port — it cannot
+  reach the internet or any other local port — so check the stored result, not
+  only the GET page.
 - When the request is ambiguous, ask instead of guessing.
 - When the user's request is fully satisfied, call the `finish` tool with a
   short summary. That is the explicit "I am done" signal; do not just go quiet
@@ -117,10 +124,11 @@ const PROMPT_TOOL_REFERENCE: &str = r#"Tool reference (names only — full schem
 - Directories: create_dir, delete_dir, list_dir
 - Search: grep, glob
 - Git: git_status, git_diff, git_log, git_commit, git_branch, git_stage
-- SQLite: sqlite_query, sqlite_execute
+- SQLite: sqlite_query (read-only), sqlite_execute (INSERT/UPDATE/DELETE),
+  sqlite_schema (CREATE/ALTER/DROP — prefer _migration.wren)
 - Bialet: bialet_run, bialet_validate, bialet_test, bialet_server_start,
   bialet_server_stop, bialet_log_read, bialet_docs
-- Web: curl
+- Web: curl (local Bialet server only; external URLs are refused)
 - Control: finish (call it to declare the task done)
 - Skills: any tool whose name matches a skill discovered in skills/"#;
 
@@ -185,11 +193,17 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
         }
     }
 
+    prompt.push_str(
+        "\n\n# Local documentation\n\n\
+         Use the `bialet_docs` tool to consult Bialet/Wren documentation offline \
+         (`topic` to search, `file` to read a page, `list` to enumerate). Bundled \
+         references for the base web stack are always available: `sqlite.md`, \
+         `html.md`, `css.md`, `javascript.md`.\n",
+    );
     if let Some(docs) = &ctx.docs_dir {
         prompt.push_str(&format!(
-            "\n\n# Local documentation\n\n\
-             Bialet/Wren documentation is available through the `bialet_docs` tool \
-             (root: {}/).\n",
+            "This project also ships the full Bialet docs (root: {}/); those pages \
+             take precedence over the bundled ones when a name collides.\n",
             docs.display()
         ));
     }

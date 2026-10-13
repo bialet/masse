@@ -15,6 +15,7 @@ pub mod bialet_tools;
 pub mod cli;
 pub mod control_tools;
 pub mod curl_tools;
+pub mod embedded_docs;
 pub mod fs_tools;
 pub mod git_tools;
 pub mod path;
@@ -55,6 +56,7 @@ pub fn builtin_registry() -> ToolRegistry {
     // SQLite
     reg.register(std::sync::Arc::new(sqlite_tools::SqliteQuery));
     reg.register(std::sync::Arc::new(sqlite_tools::SqliteExecute));
+    reg.register(std::sync::Arc::new(sqlite_tools::SqliteSchema));
     // Bialet
     reg.register(std::sync::Arc::new(bialet_tools::BialetRun));
     reg.register(std::sync::Arc::new(bialet_tools::BialetValidate));

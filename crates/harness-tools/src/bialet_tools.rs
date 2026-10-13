@@ -264,7 +264,14 @@ impl Tool for BialetServerStart {
         ];
         match ctx
             .processes
-            .start(&name, &ctx.bialet_bin, &cmd_args, &ctx.root, Some(&log))
+            .start(
+                &name,
+                &ctx.bialet_bin,
+                &cmd_args,
+                &ctx.root,
+                Some(&log),
+                Some(port),
+            )
             .await
         {
             Ok(pid) => {
@@ -455,43 +462,56 @@ impl Tool for BialetDocs {
     }
 
     async fn call(&self, ctx: &ToolContext, args: Json) -> ToolResult {
-        let Some(docs) = ctx.docs_dir.clone() else {
-            return ToolResult::err(
-                "no Bialet docs directory configured; pass --bialet-docs <dir> or set MASSE_BIALET_DOCS",
-            );
-        };
-        if !docs.is_dir() {
-            return ToolResult::err(format!("docs directory not found: {}", docs.display()));
-        }
+        let docs = ctx.docs_dir.clone().filter(|d| d.is_dir());
 
         if opt_bool(&args, "list", false) {
-            let mut files = Vec::new();
-            collect_docs(&docs, &mut files).await;
-            files.sort();
-            let mut out = String::new();
-            for f in &files {
-                let rel = f.strip_prefix(&docs).unwrap_or(f);
-                out.push_str(&rel.display().to_string());
-                out.push('\n');
+            let mut names: Vec<String> = Vec::new();
+            if let Some(docs) = docs.as_deref() {
+                let mut files = Vec::new();
+                collect_docs(docs, &mut files).await;
+                for f in &files {
+                    let rel = f.strip_prefix(docs).unwrap_or(f).display().to_string();
+                    names.push(rel);
+                }
             }
-            return ToolResult::ok(if out.is_empty() {
+            let local: std::collections::HashSet<String> = names.iter().cloned().collect();
+            for doc in crate::embedded_docs::EMBEDDED_DOCS {
+                if !local.contains(doc.name) {
+                    names.push(doc.name.to_string());
+                }
+            }
+            names.sort();
+            return ToolResult::ok(if names.is_empty() {
                 "(no docs found)".into()
             } else {
-                out
+                format!("{}\n", names.join("\n"))
             });
         }
 
         if let Some(rel) = opt_str(&args, "file") {
-            let path = match crate::path::resolve_existing_within(&docs, &rel) {
-                Ok(p) => p,
-                Err(e) => return ToolResult::err(format!("cannot open doc '{rel}': {e}")),
-            };
-            let content = match tokio::fs::read_to_string(&path).await {
-                Ok(c) => c,
-                Err(e) => return ToolResult::err(format!("cannot read doc: {e}")),
-            };
-            let (text, _) = truncate_lines(&content, 1000);
-            return ToolResult::ok(text);
+            // A local file wins over the bundled page of the same name.
+            if let Some(docs) = docs.as_deref() {
+                if let Ok(path) = crate::path::resolve_existing_within(docs, &rel) {
+                    return match tokio::fs::read_to_string(&path).await {
+                        Ok(content) => {
+                            let (text, _) = truncate_lines(&content, 1000);
+                            ToolResult::ok(text)
+                        }
+                        Err(e) => ToolResult::err(format!("cannot read doc: {e}")),
+                    };
+                }
+            }
+            let base = std::path::Path::new(&rel)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(rel.as_str());
+            if let Some(doc) =
+                crate::embedded_docs::get(base).or_else(|| crate::embedded_docs::get(&rel))
+            {
+                let (text, _) = truncate_lines(doc.content, 1000);
+                return ToolResult::ok(text);
+            }
+            return ToolResult::err(format!("doc not found: {rel}"));
         }
 
         let topic = match opt_str(&args, "topic") {
@@ -503,53 +523,88 @@ impl Tool for BialetDocs {
         let needle = topic.to_lowercase();
         let max = opt_u64(&args, "max_results").unwrap_or(60) as usize;
         let context = opt_u64(&args, "context").unwrap_or(2) as usize;
-        let mut files = Vec::new();
-        collect_docs(&docs, &mut files).await;
-        files.sort();
 
         let mut out = String::new();
         let mut hits = 0usize;
-        for file in files {
-            let content = match tokio::fs::read_to_string(&file).await {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let rel = file
-                .strip_prefix(&docs)
-                .unwrap_or(&file)
-                .display()
-                .to_string();
-            let lines: Vec<&str> = content.lines().collect();
-            let mut printed_upto = 0usize;
-            for (i, line) in lines.iter().enumerate() {
-                if !line.to_lowercase().contains(&needle) {
+
+        // Local files first (project-specific, likely newer), then bundled ones.
+        if let Some(docs) = docs.as_deref() {
+            let mut files = Vec::new();
+            collect_docs(docs, &mut files).await;
+            files.sort();
+            for file in files {
+                let Ok(content) = tokio::fs::read_to_string(&file).await else {
                     continue;
-                }
-                hits += 1;
-                // Show a window around the match so the model gets the API in
-                // context, not a bare line it has to guess the shape of.
-                let start = i.saturating_sub(context);
-                let end = (i + context + 1).min(lines.len());
-                if printed_upto > 0 && start > printed_upto {
-                    out.push_str("--\n");
-                }
-                let from = start.max(printed_upto);
-                for (j, l) in lines.iter().enumerate().take(end).skip(from) {
-                    out.push_str(&format!("{rel}:{}: {}\n", j + 1, l.trim_end()));
-                }
-                printed_upto = end;
-                if hits >= max {
+                };
+                let rel = file
+                    .strip_prefix(docs)
+                    .unwrap_or(&file)
+                    .display()
+                    .to_string();
+                if search_text(&rel, &content, &needle, context, max, &mut out, &mut hits) {
                     out.push_str(&format!("[masse] truncated at {max} matches\n"));
                     return ToolResult::ok(out);
                 }
             }
         }
+        for doc in crate::embedded_docs::EMBEDDED_DOCS {
+            if search_text(
+                doc.name,
+                doc.content,
+                &needle,
+                context,
+                max,
+                &mut out,
+                &mut hits,
+            ) {
+                out.push_str(&format!("[masse] truncated at {max} matches\n"));
+                return ToolResult::ok(out);
+            }
+        }
+
         if out.is_empty() {
             ToolResult::ok(format!("no documentation matched `{topic}`"))
         } else {
             ToolResult::ok(out)
         }
     }
+}
+
+/// Append context windows around every line of `content` containing `needle`.
+/// Returns true once `max` matches have been printed, so the caller can stop.
+fn search_text(
+    label: &str,
+    content: &str,
+    needle: &str,
+    context: usize,
+    max: usize,
+    out: &mut String,
+    hits: &mut usize,
+) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut printed_upto = 0usize;
+    for (i, line) in lines.iter().enumerate() {
+        if !line.to_lowercase().contains(needle) {
+            continue;
+        }
+        *hits += 1;
+        // Show a window around the match so the model gets the API in
+        // context, not a bare line it has to guess the shape of.
+        let start = i.saturating_sub(context);
+        let end = (i + context + 1).min(lines.len());
+        if printed_upto > 0 && start > printed_upto {
+            out.push_str("--\n");
+        }
+        let from = start.max(printed_upto);
+        for (j, l) in lines.iter().enumerate().take(end).skip(from) {
+            out.push_str(&format!("{label}:{}: {}\n", j + 1, l.trim_end()));
+        }
+        printed_upto = end;
+        if *hits >= max {
+            return true;
+        }
+    }
+    false
 }
 
 async fn collect_docs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {

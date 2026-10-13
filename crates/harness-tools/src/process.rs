@@ -43,6 +43,9 @@ struct Managed {
     pid: Option<u32>,
     display: String,
     log_file: Option<String>,
+    /// Loopback port this process serves on, when known. Used to confine
+    /// `curl` to the server that `bialet_server_start` opened.
+    port: Option<u16>,
 }
 
 /// Metadata about a running process, safe to serialize.
@@ -52,6 +55,8 @@ pub struct ProcessInfo {
     pub pid: Option<u32>,
     pub display: String,
     pub log_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Default)]
@@ -71,7 +76,8 @@ impl ProcessRegistry {
     }
 
     /// Spawn `program args...` in `cwd`, redirecting output to `log_file` when
-    /// provided. Returns the PID.
+    /// provided. `port` records the loopback port the process serves on, when
+    /// known, so other tools can allowlist it. Returns the PID.
     pub async fn start(
         &self,
         key: &str,
@@ -79,6 +85,7 @@ impl ProcessRegistry {
         args: &[String],
         cwd: &Path,
         log_file: Option<&Path>,
+        port: Option<u16>,
     ) -> Result<u32, String> {
         let mut guard = self.inner.lock().await;
         if let Some(existing) = guard.procs.get_mut(key) {
@@ -135,6 +142,7 @@ impl ProcessRegistry {
                 pid,
                 display,
                 log_file: log_file.map(|p| p.display().to_string()),
+                port,
             },
         );
         Ok(pid.unwrap_or(0))
@@ -169,6 +177,18 @@ impl ProcessRegistry {
         }
     }
 
+    /// Whether `port` belongs to a **live** tracked process.
+    ///
+    /// This is the allowlist that confines `curl` to the Bialet server started
+    /// by `bialet_server_start`: no tracked live process means no allowed port.
+    pub async fn is_allowed_port(&self, port: u16) -> bool {
+        let mut guard = self.inner.lock().await;
+        guard
+            .procs
+            .values_mut()
+            .any(|m| m.port == Some(port) && matches!(m.child.try_wait(), Ok(None)))
+    }
+
     pub async fn list(&self) -> Vec<ProcessInfo> {
         let mut guard = self.inner.lock().await;
         let mut out: Vec<ProcessInfo> = guard
@@ -181,6 +201,7 @@ impl ProcessRegistry {
                     pid: if alive { m.pid } else { None },
                     display: m.display.clone(),
                     log_file: m.log_file.clone(),
+                    port: if alive { m.port } else { None },
                 }
             })
             .collect();

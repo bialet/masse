@@ -31,10 +31,12 @@ Files: `read_file`, `write_file`, `edit_file`, `delete_file`.
 Directories: `create_dir`, `delete_dir`, `list_dir`.
 Search: `grep`, `glob`.
 Git: `git_status`, `git_diff`, `git_log`, `git_commit`, `git_branch`, `git_stage`.
-SQLite: `sqlite_query`, `sqlite_execute`.
+SQLite: `sqlite_query` (read-only), `sqlite_execute` (row changes),
+`sqlite_schema` (structure changes).
 Bialet: `bialet_run`, `bialet_validate`, `bialet_test`, `bialet_server_start`,
 `bialet_server_stop`, `bialet_log_read`, `bialet_docs`.
-Web: `curl`.
+Web: `curl` — local Bialet server only (loopback + the port opened by
+`bialet_server_start`); external URLs are refused.
 Control: `finish` — call it to declare the task done (stops the turn).
 
 There is no generic shell tool: every tool is atomic and external binaries are

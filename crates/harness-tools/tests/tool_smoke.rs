@@ -137,11 +137,22 @@ async fn sqlite_tools_roundtrip() {
     let ctx = ToolContext::new(&root);
     let reg = builtin_registry();
 
+    // Structure goes through sqlite_schema.
+    let r = reg
+        .call(
+            "sqlite_schema",
+            &ctx,
+            json!({"db": "test.db", "sql": "CREATE TABLE t(a TEXT);"}),
+        )
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+
+    // Rows go through sqlite_execute.
     let r = reg
         .call(
             "sqlite_execute",
             &ctx,
-            json!({"db": "test.db", "sql": "CREATE TABLE t(a TEXT); INSERT INTO t VALUES ('x');"}),
+            json!({"db": "test.db", "sql": "INSERT INTO t VALUES ('x');"}),
         )
         .await;
     assert!(!r.is_error(), "{}", r.output);
@@ -156,6 +167,39 @@ async fn sqlite_tools_roundtrip() {
     assert!(!r.is_error(), "{}", r.output);
     assert!(r.output.contains('x'), "{}", r.output);
 
+    // The guards: DDL is refused by execute, DML by schema.
+    let r = reg
+        .call(
+            "sqlite_execute",
+            &ctx,
+            json!({"db": "test.db", "sql": "DROP TABLE t;"}),
+        )
+        .await;
+    assert!(r.is_error(), "DDL must be refused by execute: {}", r.output);
+
+    let r = reg
+        .call(
+            "sqlite_schema",
+            &ctx,
+            json!({"db": "test.db", "sql": "DELETE FROM t;"}),
+        )
+        .await;
+    assert!(r.is_error(), "DML must be refused by schema: {}", r.output);
+
+    // The read-only tool refuses writes at the connection.
+    let r = reg
+        .call(
+            "sqlite_query",
+            &ctx,
+            json!({"db": "test.db", "sql": "INSERT INTO t VALUES ('y');"}),
+        )
+        .await;
+    assert!(
+        r.is_error(),
+        "writes must fail on the read-only tool: {}",
+        r.output
+    );
+
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -168,6 +212,55 @@ fn docs_dir() -> Option<PathBuf> {
     }
     let candidate = PathBuf::from("/Users/albo/work/bialet/bialet/docs");
     candidate.is_dir().then_some(candidate)
+}
+
+#[tokio::test]
+async fn curl_refuses_external_and_unstarted_ports() {
+    let root = temp_root("curl");
+    let ctx = ToolContext::new(&root);
+    let reg = builtin_registry();
+
+    let r = reg
+        .call("curl", &ctx, json!({"url": "https://example.com/"}))
+        .await;
+    assert!(r.is_error(), "external host must be refused: {}", r.output);
+
+    let r = reg
+        .call("curl", &ctx, json!({"url": "http://127.0.0.1:7001/"}))
+        .await;
+    assert!(
+        r.is_error(),
+        "a loopback port with no server must be refused: {}",
+        r.output
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn bialet_docs_serves_bundled_pages() {
+    // No docs dir configured: the bundled reference must still answer.
+    let root = temp_root("docs-embedded");
+    let ctx = ToolContext::new(&root);
+    let reg = builtin_registry();
+
+    let r = reg.call("bialet_docs", &ctx, json!({"list": true})).await;
+    assert!(!r.is_error(), "{}", r.output);
+    assert!(r.output.contains("sqlite.md"), "{}", r.output);
+
+    let r = reg
+        .call("bialet_docs", &ctx, json!({"file": "css.md"}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+    assert!(r.output.contains("box-sizing"), "{}", r.output);
+
+    let r = reg
+        .call("bialet_docs", &ctx, json!({"topic": "CREATE TABLE"}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+    assert!(r.output.contains("CREATE TABLE"), "{}", r.output);
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
