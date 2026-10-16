@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -174,6 +175,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut events = state.handle.subscribe();
 
+    // Ping periodically so proxies that drop idle WebSockets (Cloudflare closes
+    // them after ~100s of silence) keep the connection open. Browsers answer
+    // Ping frames with a Pong automatically, so this also flushes dead peers.
+    let mut keepalive = tokio::time::interval(Duration::from_secs(25));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    keepalive.tick().await;
+
     // Replay history first so a late client sees the whole session.
     if let Ok(history) = state.session.read_all().await {
         let payload = json!({
@@ -192,6 +200,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
             incoming = receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
@@ -354,6 +367,8 @@ const statusEl = document.getElementById('status');
 const inputEl = document.getElementById('msg');
 const sendEl = document.getElementById('send');
 let ws;
+let reconnectDelay = 1000;
+let queued = '';
 
 function append(cls, text) {
   const div = document.createElement('div');
@@ -436,8 +451,24 @@ function renderLiveEvent(ev) {
 
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
-  ws.onopen = () => { statusEl.textContent = 'connected'; };
-  ws.onclose = () => { statusEl.textContent = 'disconnected — reload to retry'; };
+  ws.onopen = () => {
+    statusEl.textContent = 'connected';
+    reconnectDelay = 1000;
+    // The server replays the whole session on every connect, so start clean.
+    logEl.innerHTML = '';
+    pending = null;
+    if (queued !== null && queued !== '') {
+      const text = queued;
+      queued = '';
+      ws.send(JSON.stringify({ type: 'user_message', text }));
+    }
+  };
+  ws.onclose = () => {
+    statusEl.textContent = 'disconnected — reconnecting…';
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+  };
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'history') { msg.events.forEach(renderHistoryEvent); flushPending(); }
@@ -447,9 +478,15 @@ function connect() {
 
 function send() {
   const text = inputEl.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: 'user_message', text }));
+  if (!text) return;
   inputEl.value = '';
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    // Not connected yet: hold the message and deliver it once we reconnect.
+    statusEl.textContent = 'reconnecting…';
+    queued = queued ? queued + '\n' + text : text;
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'user_message', text }));
 }
 sendEl.onclick = send;
 inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
