@@ -347,6 +347,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
   #log .md table { border-collapse: collapse; margin: 0.4em 0; }
   #log .md th, #log .md td { border: 1px solid #2a2a33; padding: 2px 8px; }
   #log .md img { max-width: 100%; }
+  #spinner { color: #d6b45a; }
+  #log .working { color: #d6b45a; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
   footer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid #2a2a33; }
   input { flex: 1; background: #1a1a22; border: 1px solid #2a2a33; color: #e6e6e6;
           padding: 8px 10px; border-radius: 6px; }
@@ -355,7 +358,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </style>
 </head>
 <body>
-<header>masse · <span id="status">connecting…</span> <span id="mode"></span></header>
+<header>masse · <span id="spinner" hidden>⠋</span> <span id="status">connecting…</span> <span id="mode"></span></header>
 <div id="log"></div>
 <footer>
   <input id="msg" placeholder="Ask masse to do something…" autocomplete="off">
@@ -366,15 +369,27 @@ const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
 const inputEl = document.getElementById('msg');
 const sendEl = document.getElementById('send');
+const spinnerEl = document.getElementById('spinner');
 let ws;
 let reconnectDelay = 1000;
 let queued = '';
+let workingEl = null;
+let workingTimer = null;
+let workingFrame = 0;
+let turnHadOutput = false;
+const SPIN = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+
+// Keep the "working" indicator pinned to the bottom as new rows arrive.
+function pinWorking() {
+  if (workingEl) logEl.appendChild(workingEl);
+}
 
 function append(cls, text) {
   const div = document.createElement('div');
   div.className = cls;
   div.textContent = text;
   logEl.appendChild(div);
+  pinWorking();
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -383,6 +398,7 @@ function appendHtml(cls, html) {
   div.className = cls;
   div.innerHTML = html;
   logEl.appendChild(div);
+  pinWorking();
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -402,7 +418,34 @@ let pending = null;
 
 // `pending` holds the rendered HTML of the assistant's last message.
 function flushPending() {
-  if (pending !== null) { renderAssistant(pending); pending = null; }
+  if (pending !== null) { renderAssistant(pending); pending = null; turnHadOutput = true; }
+}
+
+// A turn can spend a long time running tools and still produce no text to show
+// (the default user mode hides tool traffic and step-by-step narration). The
+// header spinner plus a log line make it obvious that masse is still working.
+function setWorking(on) {
+  sendEl.disabled = on;
+  if (on) {
+    if (workingTimer === null) {
+      spinnerEl.hidden = false;
+      workingTimer = setInterval(() => {
+        workingFrame = (workingFrame + 1) % SPIN.length;
+        spinnerEl.textContent = SPIN[workingFrame];
+      }, 100);
+    }
+    if (!workingEl) {
+      workingEl = document.createElement('div');
+      workingEl.className = 'working';
+      workingEl.textContent = 'masse está trabajando…';
+      logEl.appendChild(workingEl);
+    }
+  } else {
+    if (workingTimer !== null) { clearInterval(workingTimer); workingTimer = null; }
+    spinnerEl.hidden = true;
+    if (workingEl) { workingEl.remove(); workingEl = null; }
+  }
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
 function renderSessionEvent(ev) {
@@ -430,6 +473,9 @@ function renderLiveEvent(ev) {
     else if (ev.text.trim()) pending = ev.html;
   } else if (ev.kind === 'user_message') {
     flushPending();
+    if (!DEBUG) append('user', 'you: ' + ev.text);
+    turnHadOutput = false;
+    setWorking(true);
   } else if (ev.kind === 'tool_call') {
     if (DEBUG) append('tool', '  ⚙ ' + ev.name + ' ' + ev.args);
   } else if (ev.kind === 'tool_result') {
@@ -439,11 +485,22 @@ function renderLiveEvent(ev) {
   } else if (ev.kind === 'notice') {
     if (DEBUG) append('result', '  • ' + ev.message);
   } else if (ev.kind === 'finished') {
-    if (DEBUG) append(ev.success ? 'assistant' : 'error', (ev.success ? '✔ finished: ' : '✘ failed: ') + ev.summary);
-    else flushPending();
+    setWorking(false);
+    if (DEBUG) {
+      append(ev.success ? 'assistant' : 'error', (ev.success ? '✔ finished: ' : '✘ failed: ') + ev.summary);
+    } else {
+      flushPending();
+      if (!turnHadOutput) {
+        if (ev.success) append('result', '✔ listo');
+        else append('error', '✘ ' + (ev.summary || 'no se pudo completar'));
+      }
+    }
   } else if (ev.kind === 'turn_finished') {
+    setWorking(false);
     flushPending();
+    if (!DEBUG && !turnHadOutput) append('result', '✔ listo');
   } else if (ev.kind === 'error') {
+    setWorking(false);
     pending = null;
     append('error', 'error: ' + ev.message);
   }
@@ -457,6 +514,8 @@ function connect() {
     // The server replays the whole session on every connect, so start clean.
     logEl.innerHTML = '';
     pending = null;
+    turnHadOutput = false;
+    setWorking(false);
     if (queued !== null && queued !== '') {
       const text = queued;
       queued = '';
@@ -465,6 +524,7 @@ function connect() {
   };
   ws.onclose = () => {
     statusEl.textContent = 'disconnected — reconnecting…';
+    setWorking(false);
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 10000);
   };
@@ -487,6 +547,7 @@ function send() {
     return;
   }
   ws.send(JSON.stringify({ type: 'user_message', text }));
+  setWorking(true);
 }
 sendEl.onclick = send;
 inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
@@ -533,5 +594,12 @@ mod tests {
     fn page_ships_the_markdown_renderer() {
         assert!(INDEX_HTML.contains("renderAssistant"));
         assert!(INDEX_HTML.contains(".md"));
+    }
+
+    #[test]
+    fn page_ships_the_working_indicator() {
+        assert!(INDEX_HTML.contains("id=\"spinner\""));
+        assert!(INDEX_HTML.contains("setWorking"));
+        assert!(INDEX_HTML.contains("trabajando"));
     }
 }
