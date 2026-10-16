@@ -36,7 +36,7 @@ impl Default for AgentConfig {
         AgentConfig {
             model: String::new(),
             temperature: 0.2,
-            max_iterations: 50,
+            max_iterations: 120,
             max_retries: 3,
             retry_delay_ms: 800,
             auto_commit: false,
@@ -88,6 +88,61 @@ const VERIFY_BEFORE_FINISH: &str = "Before you finish: you changed Wren files bu
 In this harness a behaviour change is not done until it is verified. Add or update an acceptance test under `_tests/` that encodes what the user asked for \
 (for a form: POST the values, then GET the page and assert they were stored), run `bialet_test`, and iterate until it is green. Then finish again. \
 If no test applies here, say why in one line and finish again.";
+
+/// One-shot nudge injected before the test nudge when the model changed Wren
+/// files without checking that they still compile.
+const VALIDATE_BEFORE_FINISH: &str = "Before you go further: you wrote or edited a `.wren` file but have not run `bialet_validate` on it since. \
+A `.wren` file that does not compile takes the whole app down, so syntax is checked first. Run `bialet_validate` on the file you just changed, fix any error it reports, and only then continue.";
+
+/// Injected when the same tool keeps failing the same way: repeating it cannot
+/// help, so the model must change approach instead of burning the iteration cap.
+const STUCK_NUDGE: &str = "You have now called the same tool several times in a row and it keeps failing in the same way, so repeating it cannot help. \
+Stop and change approach: read the failure carefully, try a different tool (for example `bialet_docs` to look up the correct API, `grep`/`read_file` to inspect the real code, or `bialet_validate` to check syntax), \
+or state in one line exactly what is blocking you. Do not issue the same call again.";
+
+/// How many consecutive same-signature failures of one tool trigger STUCK_NUDGE.
+const STUCK_THRESHOLD: u32 = 4;
+
+/// Normalize a tool failure into a signature that ignores volatile details
+/// (timestamps, line numbers, row ids) so a stuck loop is visible even when the
+/// model varies the arguments slightly between otherwise identical attempts.
+fn failure_signature(output: &str) -> String {
+    let mut sig = String::new();
+    let mut last_space = true;
+    for ch in output.chars().flat_map(|c| c.to_lowercase()) {
+        // Letters only: digits are dropped so timestamps, line numbers and row
+        // ids do not masquerade as different failures.
+        if ch.is_alphabetic() {
+            sig.push(ch);
+            last_space = false;
+        } else if !last_space {
+            sig.push(' ');
+            last_space = true;
+        }
+        if sig.len() >= 200 {
+            break;
+        }
+    }
+    sig.trim().to_string()
+}
+
+/// Which verification step (if any) is still owed before the turn may end.
+/// Syntax comes before the test run: a file that does not compile cannot be
+/// exercised, so check it first.
+fn pending_verification(
+    wren_unvalidated: bool,
+    syntax_nudged: bool,
+    wren_changed: bool,
+    verify_nudged: bool,
+) -> Option<&'static str> {
+    if wren_unvalidated && !syntax_nudged {
+        Some(VALIDATE_BEFORE_FINISH)
+    } else if wren_changed && !verify_nudged {
+        Some(VERIFY_BEFORE_FINISH)
+    } else {
+        None
+    }
+}
 
 /// How a turn ended.
 enum TurnOutcome {
@@ -345,11 +400,16 @@ impl Agent {
         // Definition-of-done tracking: did we change Wren code since the last
         // green test run, and have we already nudged once this turn?
         let mut wren_changed = false;
+        let mut wren_unvalidated = false;
         let mut verify_nudged = false;
+        let mut syntax_nudged = false;
         // Repeated-call detection: the last call signature and how many times in
         // a row it has been issued.
         let mut last_call: Option<String> = None;
         let mut repeat_count: u32 = 0;
+        // Stuck-loop detection: the last failure signature and its run length.
+        let mut last_failure: Option<String> = None;
+        let mut failure_count: u32 = 0;
 
         for _ in 0..self.config.max_iterations {
             let request = ChatRequest {
@@ -397,18 +457,34 @@ impl Agent {
 
             if calls.is_empty() {
                 // The model stopped on its own. If it just changed Wren code and
-                // is not asking the user a question, make it verify first.
-                if wren_changed && !verify_nudged && !looks_like_question(&response.content) {
-                    verify_nudged = true;
-                    emit!(AgentEvent::Notice(
-                        "verifying the change before finishing".into()
-                    ));
-                    self.messages.push(ChatMessage::user(VERIFY_BEFORE_FINISH));
-                    continue;
+                // is not asking the user a question, make it check syntax and
+                // verify before it can finish.
+                if !looks_like_question(&response.content) {
+                    if let Some(nudge) = pending_verification(
+                        wren_unvalidated,
+                        syntax_nudged,
+                        wren_changed,
+                        verify_nudged,
+                    ) {
+                        if nudge == VALIDATE_BEFORE_FINISH {
+                            syntax_nudged = true;
+                            emit!(AgentEvent::Notice(
+                                "checking syntax before finishing".into()
+                            ));
+                        } else {
+                            verify_nudged = true;
+                            emit!(AgentEvent::Notice(
+                                "verifying the change before finishing".into()
+                            ));
+                        }
+                        self.messages.push(ChatMessage::user(nudge));
+                        continue;
+                    }
                 }
                 return Ok(TurnOutcome::Stopped(response.content));
             }
 
+            let mut stuck_nudge_pending = false;
             for call in calls {
                 // Break tool-call loops: the same call with identical arguments
                 // three times in a row cannot produce a new result.
@@ -467,6 +543,19 @@ impl Agent {
                     output: result.output.clone(),
                     exit_code: result.exit_code,
                 });
+
+                // Compute the failure signature before `result.output` is moved
+                // into the transcript below.
+                let fail_sig = if result.status == ToolStatus::Ok {
+                    None
+                } else {
+                    Some(format!(
+                        "{}\u{1}{}",
+                        call.name,
+                        failure_signature(&result.output)
+                    ))
+                };
+
                 self.messages.push(ChatMessage::tool_result(
                     call.id.clone(),
                     call.name.clone(),
@@ -475,20 +564,61 @@ impl Agent {
 
                 if changed_wren {
                     wren_changed = true;
+                    wren_unvalidated = true;
+                }
+                if call.name == "bialet_validate" && result.status == ToolStatus::Ok {
+                    wren_unvalidated = false;
                 }
                 if call.name == "bialet_test" && result.status == ToolStatus::Ok {
                     wren_changed = false;
+                    wren_unvalidated = false;
+                }
+
+                // Stuck-loop detection: the same tool failing the same way over
+                // and over cannot make progress. Flag it so the model is nudged
+                // to change approach after this batch of calls.
+                if let Some(sig) = fail_sig {
+                    if last_failure.as_deref() == Some(sig.as_str()) {
+                        failure_count += 1;
+                    } else {
+                        failure_count = 1;
+                        last_failure = Some(sig);
+                    }
+                    if failure_count >= STUCK_THRESHOLD {
+                        failure_count = 0;
+                        last_failure = None;
+                        stuck_nudge_pending = true;
+                        emit!(AgentEvent::Notice(format!(
+                            "`{}` failed the same way {STUCK_THRESHOLD} times; asking the model to change approach",
+                            call.name
+                        )));
+                    }
+                } else {
+                    failure_count = 0;
+                    last_failure = None;
                 }
 
                 // The `finish` tool ends the turn with an explicit outcome, but
-                // not before we have verified the changes at least once.
+                // not before syntax is checked and the change is verified.
                 if let Some(t) = terminate {
-                    if wren_changed && !verify_nudged {
-                        verify_nudged = true;
-                        emit!(AgentEvent::Notice(
-                            "verifying the change before finishing".into()
-                        ));
-                        self.messages.push(ChatMessage::user(VERIFY_BEFORE_FINISH));
+                    if let Some(nudge) = pending_verification(
+                        wren_unvalidated,
+                        syntax_nudged,
+                        wren_changed,
+                        verify_nudged,
+                    ) {
+                        if nudge == VALIDATE_BEFORE_FINISH {
+                            syntax_nudged = true;
+                            emit!(AgentEvent::Notice(
+                                "checking syntax before finishing".into()
+                            ));
+                        } else {
+                            verify_nudged = true;
+                            emit!(AgentEvent::Notice(
+                                "verifying the change before finishing".into()
+                            ));
+                        }
+                        self.messages.push(ChatMessage::user(nudge));
                         break;
                     }
                     return Ok(TurnOutcome::Finished {
@@ -496,6 +626,11 @@ impl Agent {
                         success: t.success,
                     });
                 }
+            }
+
+            if stuck_nudge_pending {
+                self.messages.push(ChatMessage::user(STUCK_NUDGE));
+                continue;
             }
         }
 
@@ -509,7 +644,9 @@ impl Agent {
         wrap_messages.push(ChatMessage::user(
             "You have reached the maximum number of tool calls for this turn. \
              Do not call any more tools. Reply with a concise summary of what you \
-             did, what remains to be done, and your best final answer.",
+             did and what remains to be done. Be honest about state: if the tests \
+             are not green, if something is unverified, or if a step is incomplete, \
+             say so plainly — do not claim the task is finished when it is not.",
         ));
         let wrap_request = ChatRequest {
             model: self.config.model.clone(),
@@ -659,5 +796,41 @@ impl AgentHandle {
 
     pub fn shutdown(&self) {
         let _ = self.tx.send(Command::Shutdown);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_signature_ignores_volatile_details() {
+        // Timestamps, line numbers and ids differ between attempts; the failure
+        // is the same one.
+        let a = "2026-10-16 17:54:43 Runtime Error Could not load module 'bialet_cli/bialet/test'.";
+        let b = "2026-10-16 17:55:02 Runtime Error Could not load module 'bialet_cli/bialet/test'.";
+        assert_eq!(failure_signature(a), failure_signature(b));
+
+        // A genuinely different failure must not collapse into the same bucket.
+        let c = "Query does not implement 'fetch(_,_,_,_,_)'.";
+        assert_ne!(failure_signature(a), failure_signature(c));
+    }
+
+    #[test]
+    fn pending_verification_prefers_syntax_then_tests() {
+        // Unvalidated Wren asks for the syntax check first.
+        assert_eq!(
+            pending_verification(true, false, true, false),
+            Some(VALIDATE_BEFORE_FINISH)
+        );
+        // Syntax already nudged: the next step is the test run.
+        assert_eq!(
+            pending_verification(true, true, true, false),
+            Some(VERIFY_BEFORE_FINISH)
+        );
+        // Both nudged: nothing owed.
+        assert_eq!(pending_verification(true, true, true, true), None);
+        // No Wren change: nothing to verify.
+        assert_eq!(pending_verification(false, false, false, false), None);
     }
 }

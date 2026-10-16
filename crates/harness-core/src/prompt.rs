@@ -43,9 +43,11 @@ How to work:
   the user's request, then run `bialet_test` and iterate until it is green
   before calling `finish`. The API is fluent (see `bialet_docs` → tests.md),
   e.g. `Test.post("/event?id=5", {"amount": "100"}).status(302)` followed by
-  `Test.get("/event?id=5").contains("100")`. A form change must assert that
-  POST → read round-trip (submit the values, then read the page back), not just
-  that the page renders.
+  `Test.get("/event?id=5").contains("100")`. Tests are flat statements — there
+  is no `describe`/`it`/`expect` API, and `Test` is already in scope, so never
+  `import "bialet/test" for Test` (that fails with "Module variable is already
+  defined"). A form change must assert that POST → read round-trip (submit the
+  values, then read the page back), not just that the page renders.
 - Test by hand too when it helps: the `curl` tool posts to the local Bialet
   server started by `bialet_server_start` (it accepts the same `data` body the
   browser would). It is confined to that server's loopback port — it cannot
@@ -71,6 +73,10 @@ Bialet essentials (always follow, even without the full guide below):
   `<fieldset>`) instead of reusing the parent's tag.
 - Data access is direct SQL using backtick query literals with `?` placeholders.
   There is no ORM. Values come back as strings: convert with `Num.fromString`.
+- A Query method takes **at most three positional parameters**; for four or
+  more, pass a single array (`.fetch([a, b, c, d])`). More than three
+  positional args is a runtime error: `Query does not implement
+  'fetch(_,_,_,_,_)'`. See `bialet_docs` → database.md.
 - `.first`, `.val` and `.toNum` append `LIMIT 1` on their own. Never write your
   own `LIMIT 1` for them, or the query becomes `... LIMIT 1 LIMIT 1` and fails.
 - `Request.post(name)` returns null when the key is missing. ALWAYS use
@@ -197,8 +203,9 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
         "\n\n# Local documentation\n\n\
          Use the `bialet_docs` tool to consult Bialet/Wren documentation offline \
          (`topic` to search, `file` to read a page, `list` to enumerate). Bundled \
-         references for the base web stack are always available: `sqlite.md`, \
-         `html.md`, `css.md`, `javascript.md`.\n",
+         references are always available: `sqlite.md` (SQL), `database.md` (the \
+         Query API), `template.md` (inline HTML), `html.md`, `html-first.md`, \
+         `css.md`, `javascript.md`, and `tests.md` (the `Test` API).\n",
     );
     if let Some(docs) = &ctx.docs_dir {
         prompt.push_str(&format!(
@@ -286,6 +293,33 @@ mod tests {
         );
         assert!(prompt.contains("cannot nest the same tag"));
         assert!(prompt.contains("LIMIT 1"));
+        assert!(prompt.contains("at most three positional parameters"));
+    }
+
+    #[test]
+    fn prompt_points_at_the_bundled_docs() {
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(prompt.contains("database.md"));
+        assert!(prompt.contains("tests.md"));
+    }
+
+    #[test]
+    fn prompt_forbids_the_test_import() {
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(prompt.contains(r#"import "bialet/test" for Test"#));
+        assert!(prompt.contains("Module variable is already"));
     }
 
     #[test]

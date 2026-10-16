@@ -19,8 +19,20 @@ pub const EMBEDDED_DOCS: &[EmbeddedDoc] = &[
         content: include_str!("../../../assets/docs/sqlite.md"),
     },
     EmbeddedDoc {
+        name: "database.md",
+        content: include_str!("../../../assets/docs/database.md"),
+    },
+    EmbeddedDoc {
         name: "html.md",
         content: include_str!("../../../assets/docs/html.md"),
+    },
+    EmbeddedDoc {
+        name: "template.md",
+        content: include_str!("../../../assets/docs/template.md"),
+    },
+    EmbeddedDoc {
+        name: "html-first.md",
+        content: include_str!("../../../assets/docs/html-first.md"),
     },
     EmbeddedDoc {
         name: "css.md",
@@ -29,6 +41,10 @@ pub const EMBEDDED_DOCS: &[EmbeddedDoc] = &[
     EmbeddedDoc {
         name: "javascript.md",
         content: include_str!("../../../assets/docs/javascript.md"),
+    },
+    EmbeddedDoc {
+        name: "tests.md",
+        content: include_str!("../../../assets/docs/tests.md"),
     },
 ];
 
@@ -43,7 +59,7 @@ mod tests {
 
     #[test]
     fn every_doc_is_present_and_non_empty() {
-        assert_eq!(EMBEDDED_DOCS.len(), 4);
+        assert_eq!(EMBEDDED_DOCS.len(), 8);
         for doc in EMBEDDED_DOCS {
             assert!(doc.content.contains('#'), "{} has no heading", doc.name);
         }
@@ -52,6 +68,39 @@ mod tests {
     #[test]
     fn lookup_by_name() {
         assert!(get("sqlite.md").is_some());
+        assert!(get("database.md").is_some());
+        assert!(get("tests.md").is_some());
         assert!(get("nope.md").is_none());
+    }
+
+    /// Every `*.md` a bundled page points at must itself be bundled, so
+    /// `bialet_docs file=<name>` never dead-ends the model.
+    #[test]
+    fn bundled_docs_have_no_dangling_references() {
+        for doc in EMBEDDED_DOCS {
+            for name in referenced_pages(doc.content) {
+                assert!(
+                    get(&name).is_some(),
+                    "{} references {} but it is not bundled",
+                    doc.name,
+                    name
+                );
+            }
+        }
+    }
+
+    /// Pull out `foo.md`-shaped names from backtick-quoted spans and prose.
+    fn referenced_pages(content: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for word in content
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'))
+        {
+            if let Some(name) = word.strip_suffix(".md") {
+                if !name.is_empty() && !name.contains('/') {
+                    found.push(format!("{name}.md"));
+                }
+            }
+        }
+        found
     }
 }

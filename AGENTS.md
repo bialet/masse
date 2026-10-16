@@ -41,13 +41,17 @@ not surface it in user mode. The shared logic lives in
 - Keep session persistence append-only and JSON-free.
 - `event_type ∈ {session_start, user_message, assistant_message, tool_call,
   tool_result, session_end}` and `status ∈ {ok, error}`.
-- A `.wren` change is not done until `bialet_test` is green. The agent loop
-  nudges once when the model tries to finish or stop after a `.wren` edit
-  without a passing test (`mutates_wren` + `VERIFY_BEFORE_FINISH` in
-  `harness-core/src/agent.rs`); keep it one-shot and question-aware.
+- A `.wren` change is not done until syntax is checked and `bialet_test` is
+  green. The agent loop nudges once for syntax (`VALIDATE_BEFORE_FINISH`) and
+  once for the test run (`VERIFY_BEFORE_FINISH`) when the model tries to finish
+  or stop after a `.wren` edit (`mutates_wren` + `pending_verification` in
+  `harness-core/src/agent.rs`); keep each nudge one-shot and question-aware.
 - Keep `ToolResult::from_cmd` honest: a non-zero exit is an error, not `ok`.
-- Break tool-call loops: three identical consecutive calls are skipped with a
-  nudge (`last_call`/`repeat_count` in `harness-core/src/agent.rs`).
+- Break tool-call loops twice over (`harness-core/src/agent.rs`): three
+  identical consecutive calls are skipped (`last_call`/`repeat_count`), and the
+  same tool failing the same way (`STUCK_THRESHOLD`, `failure_signature`, which
+  drops digits so timestamps/ids don't hide a repeat) earns a change-of-approach
+  nudge. Both must reset so a fresh budget follows.
 - Background servers are spawned with `process_group(0)` and killed by group
   (`harness-tools/src/process.rs`); Bialet forks a worker that survives a plain
   child kill and would keep the port.

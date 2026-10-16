@@ -441,11 +441,21 @@ async fn a_wren_change_is_nudged_before_the_model_can_stop() {
         tool_calls: vec![],
         finish_reason: Some("stop".into()),
     });
-    // After the nudge it finishes.
+    // After the syntax nudge it tries to finish; after the test nudge it is
+    // finally allowed.
     responses.push_back(ChatResponse {
         content: String::new(),
         tool_calls: vec![ToolCall {
             id: "c2".into(),
+            name: "finish".into(),
+            arguments: r#"{"summary":"primero","success":true}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "c3".into(),
             name: "finish".into(),
             arguments: r#"{"summary":"verificado","success":true}"#.into(),
         }],
@@ -461,18 +471,23 @@ async fn a_wren_change_is_nudged_before_the_model_can_stop() {
     let reply = agent.send("cambiá app.wren", Some(&tx)).await.unwrap();
     assert_eq!(
         reply, "verificado",
-        "the turn must not end on the first summary after a .wren edit"
+        "the turn must not end until syntax is checked and the change is verified"
     );
 
-    let mut nudged = false;
+    let mut saw_syntax = false;
+    let mut saw_verify = false;
     while let Ok(event) = rx.try_recv() {
         if let AgentEvent::Notice(message) = event {
+            if message.contains("checking syntax") {
+                saw_syntax = true;
+            }
             if message.contains("verifying") {
-                nudged = true;
+                saw_verify = true;
             }
         }
     }
-    assert!(nudged, "a verification Notice must be emitted");
+    assert!(saw_syntax, "a syntax-check Notice must be emitted");
+    assert!(saw_verify, "a verification Notice must be emitted");
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -511,7 +526,7 @@ async fn a_question_after_a_wren_change_is_not_nudged() {
 }
 
 #[tokio::test]
-async fn finish_after_a_wren_change_is_nudged_once_then_allowed() {
+async fn finish_after_a_wren_change_is_held_for_syntax_then_tests() {
     let root = std::env::temp_dir().join(format!("masse-verify-finish-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -526,24 +541,18 @@ async fn finish_after_a_wren_change_is_nudged_once_then_allowed() {
         }],
         finish_reason: Some("tool_calls".into()),
     });
-    responses.push_back(ChatResponse {
-        content: String::new(),
-        tool_calls: vec![ToolCall {
-            id: "c2".into(),
-            name: "finish".into(),
-            arguments: r#"{"summary":"primero","success":true}"#.into(),
-        }],
-        finish_reason: Some("tool_calls".into()),
-    });
-    responses.push_back(ChatResponse {
-        content: String::new(),
-        tool_calls: vec![ToolCall {
-            id: "c3".into(),
-            name: "finish".into(),
-            arguments: r#"{"summary":"segundo","success":true}"#.into(),
-        }],
-        finish_reason: Some("tool_calls".into()),
-    });
+    // Three finishes: syntax nudge, then test nudge, then allowed.
+    for (id, summary) in [("c2", "primero"), ("c3", "segundo"), ("c4", "tercero")] {
+        responses.push_back(ChatResponse {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.into(),
+                name: "finish".into(),
+                arguments: format!(r#"{{"summary":"{summary}","success":true}}"#),
+            }],
+            finish_reason: Some("tool_calls".into()),
+        });
+    }
 
     let provider = Arc::new(ScriptedProvider {
         responses: Mutex::new(responses),
@@ -552,8 +561,8 @@ async fn finish_after_a_wren_change_is_nudged_once_then_allowed() {
 
     let reply = agent.send("cambiá app.wren", None).await.unwrap();
     assert_eq!(
-        reply, "segundo",
-        "the first finish is held back; the second is allowed"
+        reply, "tercero",
+        "the early finishes are held back; the one after both nudges is allowed"
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -687,6 +696,76 @@ async fn auto_commit_commits_after_a_turn() {
     assert!(
         !log.stdout.is_empty(),
         "the turn's changes should have been committed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A provider whose read_file calls fail the same way but with different
+/// arguments, mimicking a model that keeps retrying with cosmetic changes.
+struct StuckFailingProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for StuckFailingProvider {
+    fn name(&self) -> &str {
+        "stuck"
+    }
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < 4 {
+            Ok(ChatResponse {
+                tool_calls: vec![ToolCall {
+                    id: format!("c{n}"),
+                    name: "read_file".into(),
+                    arguments: format!(r#"{{"path":"missing{n}.txt"}}"#),
+                }],
+                ..Default::default()
+            })
+        } else {
+            Ok(ChatResponse {
+                content: "stopped".into(),
+                ..Default::default()
+            })
+        }
+    }
+}
+
+#[tokio::test]
+async fn repeated_failures_with_varying_args_nudge_a_change_of_approach() {
+    let root = std::env::temp_dir().join(format!("masse-stuck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(StuckFailingProvider {
+        calls: calls.clone(),
+    });
+    let mut agent = build_agent(provider, &root).await;
+    let (tx, mut rx) = broadcast::channel(64);
+
+    let reply = agent.send("go", Some(&tx)).await.unwrap();
+    assert_eq!(reply, "stopped");
+
+    let mut saw_notice = false;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Notice(message) = event {
+            if message.contains("change approach") {
+                saw_notice = true;
+            }
+        }
+    }
+    assert!(
+        saw_notice,
+        "the same failure repeating with differing args must trigger a Notice"
+    );
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|m| m.content.contains("keeps failing in the same way")),
+        "a change-of-approach nudge must reach the conversation"
     );
 
     let _ = std::fs::remove_dir_all(&root);

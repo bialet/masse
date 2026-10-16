@@ -247,12 +247,43 @@ async fn bialet_docs_serves_bundled_pages() {
     let r = reg.call("bialet_docs", &ctx, json!({"list": true})).await;
     assert!(!r.is_error(), "{}", r.output);
     assert!(r.output.contains("sqlite.md"), "{}", r.output);
+    assert!(r.output.contains("tests.md"), "{}", r.output);
+    assert!(r.output.contains("database.md"), "{}", r.output);
 
     let r = reg
         .call("bialet_docs", &ctx, json!({"file": "css.md"}))
         .await;
     assert!(!r.is_error(), "{}", r.output);
     assert!(r.output.contains("box-sizing"), "{}", r.output);
+
+    // The test API must be discoverable by name and by symbol.
+    let r = reg
+        .call("bialet_docs", &ctx, json!({"file": "tests.md"}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+    assert!(r.output.contains("notContains"), "{}", r.output);
+    assert!(
+        r.output.contains("Module variable is already defined"),
+        "{}",
+        r.output
+    );
+
+    let r = reg
+        .call("bialet_docs", &ctx, json!({"topic": "notContains"}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+    assert!(r.output.contains("notContains"), "{}", r.output);
+
+    // The Query arity limit that caused the failed run is documented.
+    let r = reg
+        .call("bialet_docs", &ctx, json!({"topic": "fetch(_,_,_,_,_)"}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
+    assert!(
+        r.output.contains("array"),
+        "the array workaround must be documented: {}",
+        r.output
+    );
 
     let r = reg
         .call("bialet_docs", &ctx, json!({"topic": "CREATE TABLE"}))

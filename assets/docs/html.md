@@ -2,8 +2,8 @@
 
 Bialet renders HTML on the server. This page is a compact reference for the
 elements, attributes and forms you reach for most; for Bialet's inline HTML
-string syntax and `{{ }}` interpolation see `html-strings.md` and
-`html-first.md`.
+string syntax and `{{ }}` interpolation see `template.md`, and for doing more
+with native HTML before reaching for JavaScript see `html-first.md`.
 
 ## Document skeleton
 

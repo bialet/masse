@@ -111,7 +111,7 @@ struct Cli {
     timeout: u64,
 
     /// Maximum tool iterations per user turn (safety cap).
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 120)]
     max_iterations: usize,
 
     /// Disable the automatic git commit after every turn.
