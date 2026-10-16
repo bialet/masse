@@ -14,6 +14,7 @@ harness-tools = { path = "../harness-tools" }
 harness-session = { path = "../harness-session" }
 harness-tui = { path = "../harness-tui" }
 harness-server = { path = "../harness-server" }
+rpassword = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

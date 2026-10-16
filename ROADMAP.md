@@ -71,6 +71,12 @@ must target that (and `.git/`, key material), not `.env*`. Redaction is a
 P2 follow-up; the immediate concern is that a compromised model can read the
 database and echo secrets into session.csv / the runtime log.
 
+masse's own provider key is kept out of that path: it lives in the user config
+file (`harness-cli/src/config.rs`), outside the workspace, with mode 0600, and
+`--print-config` masks it. `--api-key-file` exists so the key can also stay out
+of argv and out of the inherited environment (`harness-tools/src/cli.rs:106`
+does not clear the environment for child processes).
+
 ## Planned work
 
 ### P0

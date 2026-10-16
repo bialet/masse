@@ -218,9 +218,12 @@ file.
 | `--tui` | — | **default** | Terminal UI |
 | `--serve` | — | — | HTTP/WebSocket server instead of the TUI |
 | `--host` / `--port` | — | `127.0.0.1` / `7001` | Server bind |
-| `--model` | `MASSE_MODEL` | `deepseek-chat` | Model id |
-| `--base-url` | `MASSE_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI-compatible base URL |
-| `--api-key` | `MASSE_API_KEY` | — | API key (absent ⇒ mock provider) |
+| `--model` | `MASSE_MODEL` | config file, then `deepseek-chat` | Model id |
+| `--base-url` | `MASSE_BASE_URL` | config file, then `https://api.deepseek.com/v1` | OpenAI-compatible base URL |
+| `--provider` | `MASSE_PROVIDER` | config file's `provider` key | Named provider profile (its `base_url`/`model`/`api_key`) |
+| `--api-key` | `MASSE_API_KEY` | config file | API key (absent ⇒ mock provider) |
+| `--api-key-file` | `MASSE_API_KEY_FILE` | — | Read the key from a file; beats `--api-key` |
+| `--config-file` | `MASSE_CONFIG_FILE` | `<user config dir>/masse/config` | Configuration file |
 | `--mock` | — | — | Force the offline mock provider |
 | `--bialet-bin` | `MASSE_BIALET_BIN` | `bialet` | Bialet binary |
 | `--bialet-docs` | `MASSE_BIALET_DOCS` | auto-detected | Docs directory for `bialet_docs` |
@@ -240,6 +243,54 @@ The provider speaks the OpenAI `chat/completions` protocol, so DeepSeek, OpenAI,
 Groq, OpenRouter, Ollama, vLLM and similar work by setting `--base-url` and
 `--api-key`. With no key, or with `--mock`, the offline mock provider is used.
 
+### Persistent configuration
+
+Settings live in a flat `KEY=VALUE` file — `~/Library/Application Support/masse/config`
+on macOS, `~/.config/masse/config` on Linux — created with mode `0600`. It lives
+**outside the workspace on purpose**: the harness's file tools are confined to
+the workspace, so a key stored here is not reachable by the model and does not
+end up in `session.csv` or `.masse/masse.log`.
+
+```bash
+masse config path                 # where the file is (and whether it exists)
+masse config set-api-key          # prompt; the key is hidden as you type and
+                                  # never reaches your shell history
+masse config set provider deepseek
+masse config set deepseek.model deepseek-reasoner
+masse config show                 # the file, with api_key values masked
+masse config unset deepseek.model
+masse config set deepseek.api_key sk-…   # target one profile explicitly
+```
+
+Two levels of keys:
+
+```text
+provider = deepseek        # the profile used by default
+model = deepseek-chat      # top-level defaults, shared by every profile
+deepseek.api_key = sk-…    # per-profile values; any profile name works
+openai.base_url = https://api.openai.com/v1
+```
+
+Precedence, lowest to highest:
+
+1. config file (`provider` selects the profile; `<profile>.<key>` beats the top-level key)
+2. `MASSE_*` environment variables
+3. command-line flags
+
+Within one level a key **file** (`--api-key-file` / `MASSE_API_KEY_FILE`) beats a
+bare key value. `--api-key-file` is the option for containers and systemd, where
+a mounted secret is safer than a value in argv (visible via `ps`) or in the
+environment (inherited by every child process, including `bialet` and `curl`).
+
+`--print-config` always masks the key and reports where it came from:
+
+```
+provider       : openai-compatible [profile deepseek]
+config file    : /Users/you/.config/masse/config (loaded)
+model          : deepseek-reasoner
+api key        : sk-t…3456 (from config file [deepseek])
+```
+
 ## Build & run
 
 Requires a Rust toolchain (`rustup`).
@@ -250,6 +301,18 @@ target/release/masse --print-config -C /path/to/project
 target/release/masse --tui -C /path/to/project
 target/release/masse --serve --port 7001 -C /path/to/project
 ```
+
+### Install
+
+Build the release binary and put `masse` on your `PATH` (`~/.cargo/bin`):
+
+```bash
+cargo install --path crates/harness-cli --locked
+```
+
+`--locked` installs exactly the versions in `Cargo.lock`. Use `--force` to
+reinstall after a change; `cargo install --list` shows what is installed and
+`cargo uninstall masse` removes it.
 
 Run the tests:
 

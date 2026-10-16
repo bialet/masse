@@ -5,13 +5,14 @@
 compile_error!("masse only supports Linux and macOS");
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use harness_core::{
     build_system_prompt, Agent, AgentConfig, AgentEvent, AgentHandle, MockProvider, OpenAiProvider,
     ProjectContext, Provider,
@@ -22,6 +23,12 @@ use harness_tools::skill_tools::SkillTool;
 use harness_tools::{builtin_registry, ToolContext};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
+
+mod config;
+use config::ConfigAction;
+
+const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
+const DEFAULT_MODEL: &str = "deepseek-chat";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -55,25 +62,41 @@ struct Cli {
     #[arg(long, default_value_t = 7001)]
     port: u16,
 
-    /// Model id passed to the provider.
-    #[arg(long, env = "MASSE_MODEL", default_value = "deepseek-chat")]
-    model: String,
+    /// Model id passed to the provider. Defaults to the config file, then
+    /// `deepseek-chat`.
+    #[arg(long, env = "MASSE_MODEL")]
+    model: Option<String>,
 
     /// OpenAI-compatible base URL (no trailing /chat/completions needed).
-    #[arg(
-        long,
-        env = "MASSE_BASE_URL",
-        default_value = "https://api.deepseek.com/v1"
-    )]
-    base_url: String,
+    /// Defaults to the config file, then `https://api.deepseek.com/v1`.
+    #[arg(long, env = "MASSE_BASE_URL")]
+    base_url: Option<String>,
+
+    /// Named provider profile from the config file (its `base_url`, `model` and
+    /// `api_key`). Overrides the file's top-level `provider` key.
+    #[arg(long, env = "MASSE_PROVIDER")]
+    provider: Option<String>,
 
     /// API key. When absent (and --mock is not set) masse runs the mock provider.
     #[arg(long, env = "MASSE_API_KEY")]
     api_key: Option<String>,
 
+    /// Read the API key from a file instead of passing it on the command line,
+    /// which is visible to other users via `ps`. Suits containers and systemd
+    /// (for example a mounted secret). Takes precedence over --api-key.
+    #[arg(long, env = "MASSE_API_KEY_FILE", value_name = "PATH")]
+    api_key_file: Option<PathBuf>,
+
+    /// Configuration file. Defaults to <user config dir>/masse/config.
+    #[arg(long, env = config::CONFIG_FILE_ENV, value_name = "PATH")]
+    config_file: Option<PathBuf>,
+
     /// Force the offline mock provider.
     #[arg(long)]
     mock: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 
     /// Bialet binary to invoke.
     #[arg(long, env = "MASSE_BIALET_BIN", default_value = "bialet")]
@@ -133,6 +156,115 @@ struct Cli {
     print_config: bool,
 }
 
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Read or write the persistent user configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// Provider settings after layering the config file, the environment and the
+/// command line (lowest to highest precedence).
+struct Resolved {
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+    /// Where the key came from, for `--print-config`.
+    api_key_source: String,
+    /// The profile in effect, if any.
+    profile: Option<String>,
+    config_path: Option<PathBuf>,
+    config_loaded: bool,
+}
+
+fn from_flag(matches: &clap::ArgMatches, id: &str) -> bool {
+    matches.value_source(id) == Some(ValueSource::CommandLine)
+}
+
+fn from_env(matches: &clap::ArgMatches, id: &str) -> bool {
+    matches.value_source(id) == Some(ValueSource::EnvVariable)
+}
+
+/// Resolve the provider settings. A flag beats an env var, an env var beats the
+/// config file, and within one layer a key *file* beats a bare key value (the
+/// file is the deployment-safe choice).
+fn resolve(cli: &Cli, matches: &clap::ArgMatches) -> Result<Resolved> {
+    let config_path = config::path(cli.config_file.as_deref());
+    let file = match &config_path {
+        Some(p) => config::load(p)?,
+        None => config::Config::default(),
+    };
+
+    // An explicit --provider/MASSE_PROVIDER wins over the file's `provider` key.
+    let profile = cli.provider.clone().or_else(|| file.provider.clone());
+    let selected = file.resolve(profile.as_deref());
+
+    let base_url = cli
+        .base_url
+        .clone()
+        .or(selected.base_url)
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    let model = cli
+        .model
+        .clone()
+        .or(selected.model)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
+    let (api_key, api_key_source) = if from_flag(matches, "api_key_file") {
+        let p = cli.api_key_file.clone().unwrap_or_default();
+        (
+            Some(read_key_file(&p)?),
+            format!("--api-key-file {}", p.display()),
+        )
+    } else if from_flag(matches, "api_key") {
+        (cli.api_key.clone(), "--api-key".to_string())
+    } else if from_env(matches, "api_key_file") {
+        let p = cli.api_key_file.clone().unwrap_or_default();
+        (
+            Some(read_key_file(&p)?),
+            format!("MASSE_API_KEY_FILE {}", p.display()),
+        )
+    } else if from_env(matches, "api_key") {
+        (cli.api_key.clone(), "MASSE_API_KEY".to_string())
+    } else if selected.api_key.is_some() {
+        let where_ = match &profile {
+            Some(p) => format!("config file [{p}]"),
+            None => "config file".to_string(),
+        };
+        (selected.api_key, where_)
+    } else {
+        (None, "none".to_string())
+    };
+
+    if let Some(key) = &api_key {
+        if key.trim().is_empty() {
+            bail!("API key is empty (use --mock to run offline)");
+        }
+    }
+
+    Ok(Resolved {
+        base_url,
+        model,
+        api_key,
+        api_key_source,
+        profile,
+        config_path,
+        config_loaded: file.loaded,
+    })
+}
+
+fn read_key_file(path: &Path) -> Result<String> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read API key file {}", path.display()))?;
+    let key = raw.trim();
+    if key.is_empty() {
+        bail!("API key file {} is empty", path.display());
+    }
+    Ok(key.to_string())
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -145,7 +277,16 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
+
+    // `masse config …` is workspace-independent: handle it before touching the
+    // project so it works from anywhere (including before the first run).
+    if let Some(Command::Config { action }) = &cli.command {
+        return config::run(action, cli.config_file.clone()).await;
+    }
+
+    let resolved = resolve(&cli, &matches)?;
 
     let root = std::fs::canonicalize(&cli.workspace)
         .with_context(|| format!("cannot resolve workspace {}", cli.workspace.display()))?;
@@ -185,40 +326,41 @@ async fn run() -> Result<()> {
     let processes = ctx.processes.clone();
 
     // Provider.
-    let provider: Arc<dyn Provider> = if cli.mock || cli.api_key.is_none() {
+    let provider: Arc<dyn Provider> = if cli.mock || resolved.api_key.is_none() {
         if !cli.mock {
             eprintln!(
-                "[masse] no API key set; using the offline mock provider (pass --api-key or MASSE_API_KEY)"
+                "[masse] no API key set; using the offline mock provider \
+                 (set one with `masse config set-api-key`, --api-key, --api-key-file or MASSE_API_KEY)"
             );
         }
         Arc::new(MockProvider::new())
     } else {
         Arc::new(OpenAiProvider::with_timeout(
-            cli.base_url.clone(),
-            cli.api_key.clone().unwrap_or_default(),
-            cli.model.clone(),
+            resolved.base_url.clone(),
+            resolved.api_key.clone().unwrap_or_default(),
+            resolved.model.clone(),
             Duration::from_secs(cli.request_timeout),
         ))
     };
 
     let mut system_prompt = build_system_prompt(&project, cli.debug);
     if let Some(path) = &cli.prompt_file {
-        let resolved = if path.is_absolute() {
+        let prompt_path = if path.is_absolute() {
             path.clone()
         } else {
             root.join(path)
         };
-        let extra = std::fs::read_to_string(&resolved)
-            .with_context(|| format!("cannot read prompt file {}", resolved.display()))?;
+        let extra = std::fs::read_to_string(&prompt_path)
+            .with_context(|| format!("cannot read prompt file {}", prompt_path.display()))?;
         system_prompt.push_str(&format!(
             "\n\n# Project-supplied initial prompt ({})\n\n",
-            resolved.display()
+            prompt_path.display()
         ));
         system_prompt.push_str(extra.trim());
         system_prompt.push('\n');
     }
     let config = AgentConfig {
-        model: cli.model.clone(),
+        model: resolved.model.clone(),
         temperature: cli.temperature,
         max_iterations: cli.max_iterations,
         max_retries: cli.max_retries,
@@ -235,6 +377,7 @@ async fn run() -> Result<()> {
     if cli.print_config {
         print_config(
             &cli,
+            &resolved,
             &root,
             &session_path,
             &runtime_log,
@@ -262,14 +405,14 @@ async fn run() -> Result<()> {
         eprintln!(
             "[masse] TUI · provider={} model={} tools={} session={} log={}",
             provider.name(),
-            cli.model,
+            resolved.model,
             tool_names.len(),
             session_path.display(),
             runtime_log.display()
         );
         let tui_config = harness_tui::TuiConfig {
             provider_name: provider.name().to_string(),
-            model: cli.model.clone(),
+            model: resolved.model.clone(),
             session_path: session_path.display().to_string(),
             tool_count: tool_names.len(),
             history,
@@ -284,7 +427,7 @@ async fn run() -> Result<()> {
         eprintln!(
             "[masse] server · provider={} model={} tools={} session={} log={}",
             provider.name(),
-            cli.model,
+            resolved.model,
             tool_names.len(),
             session_path.display(),
             runtime_log.display()
@@ -294,7 +437,7 @@ async fn run() -> Result<()> {
             session: session.clone(),
             tools: registry.clone(),
             provider_name: provider.name().to_string(),
-            model: cli.model.clone(),
+            model: resolved.model.clone(),
             root: root.display().to_string(),
             log_path: Some(runtime_log.clone()),
             debug: cli.debug,
@@ -310,6 +453,7 @@ async fn run() -> Result<()> {
 
 fn print_config(
     cli: &Cli,
+    resolved: &Resolved,
     root: &std::path::Path,
     session_path: &std::path::Path,
     runtime_log: &std::path::Path,
@@ -326,14 +470,35 @@ fn print_config(
     }
     println!(
         "provider       : {}",
-        if cli.mock || cli.api_key.is_none() {
-            "mock"
+        if cli.mock || resolved.api_key.is_none() {
+            "mock (no API key)".to_string()
         } else {
-            "openai-compatible"
+            let name = resolved.profile.as_deref().unwrap_or("default");
+            format!("openai-compatible [profile {name}]")
         }
     );
-    println!("base url       : {}", cli.base_url);
-    println!("model          : {}", cli.model);
+    match &resolved.config_path {
+        Some(p) => println!(
+            "config file    : {} ({})",
+            p.display(),
+            if resolved.config_loaded {
+                "loaded"
+            } else {
+                "absent"
+            }
+        ),
+        None => println!("config file    : (no config directory)"),
+    }
+    println!("base url       : {}", resolved.base_url);
+    println!("model          : {}", resolved.model);
+    match &resolved.api_key {
+        Some(k) => println!(
+            "api key        : {} (from {})",
+            config::mask(k),
+            resolved.api_key_source
+        ),
+        None => println!("api key        : (none)"),
+    }
     println!("request timeout: {}s", cli.request_timeout);
     println!(
         "retries        : {} (base {}ms)",

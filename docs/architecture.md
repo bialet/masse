@@ -80,7 +80,9 @@ async fn complete(&self, request: ChatRequest) -> Result<ChatResponse>;
 
 `OpenAiProvider` speaks the OpenAI `chat/completions` protocol over `reqwest`
 with rustls, so any compatible endpoint works. `MockProvider` is deterministic
-and used when no API key is configured.
+and used when no API key is configured. Provider settings are layered — config
+file, then `MASSE_*` env vars, then flags — by `resolve` in `harness-cli`; the
+key itself lives outside the workspace (see `harness-cli/src/config.rs`).
 
 ### Rehydration
 

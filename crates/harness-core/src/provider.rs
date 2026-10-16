@@ -279,7 +279,7 @@ impl Provider for MockProvider {
             .unwrap_or_default();
         Ok(ChatResponse {
             content: format!(
-                "[mock] You said: {last_user}\n\nConfigure a real provider with --api-key (or MASSE_API_KEY) to get model responses."
+                "[mock] You said: {last_user}\n\nConfigure a real provider with `masse config set-api-key` (or --api-key / MASSE_API_KEY) to get model responses."
             ),
             ..Default::default()
         })
