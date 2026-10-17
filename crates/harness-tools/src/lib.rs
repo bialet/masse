@@ -23,6 +23,7 @@ pub mod process;
 pub mod registry;
 pub mod search_tools;
 pub mod skill_tools;
+pub mod spreadsheet_tools;
 pub mod sqlite_tools;
 pub mod tool;
 
@@ -45,6 +46,8 @@ pub fn builtin_registry() -> ToolRegistry {
     // Search
     reg.register(std::sync::Arc::new(search_tools::Grep));
     reg.register(std::sync::Arc::new(search_tools::FindGlob));
+    // Spreadsheets
+    reg.register(std::sync::Arc::new(spreadsheet_tools::ReadSpreadsheet));
     // Git
     reg.register(std::sync::Arc::new(git_tools::GitStatus));
     reg.register(std::sync::Arc::new(git_tools::GitDiff));

@@ -11,9 +11,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
-use axum::response::{Html, IntoResponse};
+use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
@@ -48,6 +50,10 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
         .route("/api/session", get(session_events))
         .route("/api/log", get(log_tail))
         .route("/api/message", post(post_message))
+        .route(
+            "/api/upload",
+            post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
         .route("/ws", get(ws_handler))
         .with_state(state);
 
@@ -164,6 +170,96 @@ async fn post_message(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "agent actor stopped" })),
         )
+    }
+}
+
+/// Largest file the browser may upload. Spreadsheets are usually small; this
+/// is a guard against accidental huge bodies, not a product limit.
+const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct UploadQuery {
+    name: Option<String>,
+}
+
+/// Accept a raw file body and store it under `.masse/uploads/`, inside the
+/// project root, so the agent can read it with `read_spreadsheet` later.
+async fn upload(
+    State(state): State<AppState>,
+    Query(q): Query<UploadQuery>,
+    body: Bytes,
+) -> Response {
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "empty file" })),
+        )
+            .into_response();
+    }
+    if body.len() > MAX_UPLOAD_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({ "error": "file too large (max 25 MB)" })),
+        )
+            .into_response();
+    }
+
+    let root = std::path::Path::new(&state.root);
+    let dir = match harness_tools::path::resolve_within(root, ".masse/uploads") {
+        Ok(dir) => dir,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    };
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("cannot create upload dir: {e}") })),
+        )
+            .into_response();
+    }
+
+    let safe = sanitize_filename(q.name.as_deref().unwrap_or("upload.bin"));
+    let dest = dir.join(format!("{}-{safe}", uuid::Uuid::new_v4().simple()));
+    if let Err(e) = tokio::fs::write(&dest, &body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("cannot save upload: {e}") })),
+        )
+            .into_response();
+    }
+
+    let rel = dest
+        .strip_prefix(root)
+        .unwrap_or(&dest)
+        .display()
+        .to_string();
+    (
+        StatusCode::OK,
+        Json(json!({ "path": rel, "bytes": body.len() })),
+    )
+        .into_response()
+}
+
+/// Keep only a safe basename: no directories, no separators, bounded length.
+fn sanitize_filename(name: &str) -> String {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("upload.bin");
+    let mut out: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    out.truncate(120);
+    if out.trim_matches('.').is_empty() {
+        "upload.bin".to_string()
+    } else {
+        out
     }
 }
 
@@ -361,6 +457,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <header>masse · <span id="spinner" hidden>⠋</span> <span id="status">connecting…</span> <span id="mode"></span></header>
 <div id="log"></div>
 <footer>
+  <button id="attach" type="button" title="Attach a spreadsheet">Attach</button>
+  <input id="file" type="file" accept=".xls,.xlsx,.xlsb,.ods" hidden>
   <input id="msg" placeholder="Ask masse to do something…" autocomplete="off">
   <button id="send">Send</button>
 </footer>
@@ -551,6 +649,35 @@ function send() {
 }
 sendEl.onclick = send;
 inputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
+// Attach: upload the file into the project (`.masse/uploads/`) and leave a
+// path reference in the composer. The agent reads it with read_spreadsheet.
+const fileEl = document.getElementById('file');
+const attachEl = document.getElementById('attach');
+attachEl.onclick = () => fileEl.click();
+fileEl.onchange = async () => {
+  const file = fileEl.files[0];
+  if (!file) return;
+  statusEl.textContent = 'uploading…';
+  try {
+    const res = await fetch('/api/upload?name=' + encodeURIComponent(file.name), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    const info = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(info.error || res.statusText);
+    const ref = '[attached file: ' + info.path + '] ';
+    inputEl.value = inputEl.value ? inputEl.value + ' ' + ref : ref;
+    inputEl.focus();
+    statusEl.textContent = 'connected';
+  } catch (e) {
+    statusEl.textContent = 'upload failed: ' + e.message;
+  } finally {
+    fileEl.value = '';
+  }
+};
+
 connect();
 </script>
 </body>
