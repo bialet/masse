@@ -349,7 +349,34 @@ Db.migrate("Seed", `
 Seed dates with SQL (`date('now')`, `strftime`) or lazily from a route/domain
 method after the app is up.
 
-## 29. Private apps need a first-run credential
+## 29. `Num.fromString(null)` raises "Argument must be a string"
+
+```wren
+// wrong: a missing form field is null
+_amount = Num.fromString(data["amount"])
+
+// correct: stringify with a default, then fall back
+_amount = Num.fromString("%(data["amount"] || 0)") || 0
+```
+
+`Num.fromString` only accepts a String. A null (or an absent key) crashes the
+constructor, so every POST 500s even though the GETs work.
+
+## 30. Do not build an HTML block inside `{{ }}`
+
+```wren
+// wrong: parsed as a map/block -> "Expect ':' after map key"
+{{ count > 0 && <div class="box">...</div> }}
+
+// correct: build the string first
+var extra = count > 0 ? <div class="box">...</div> : ""
+{{ extra }}
+```
+
+Bialet's `{{ }}` expects an expression, not an inline HTML tree. Assign the
+block to a variable (or a small helper) and interpolate that.
+
+## 30. Private apps need a first-run credential
 
 An empty admin key/password either locks everyone out or opens everything. Seed
 one in the migration (`INSERT OR IGNORE ...`) or add a `/primer-uso` page that

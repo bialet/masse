@@ -297,6 +297,27 @@ fn invalid_arguments_message(tool: &str, bytes: usize) -> String {
 /// often sees the raw error in a server log but does not connect it to the
 /// language rule; this nudge does that at the moment the error appears.
 fn wren_trap_hint(output: &str) -> Option<&'static str> {
+    if output.contains("Internal Server Error") || output.contains("500 Internal Server Error") {
+        return Some(
+            "A 500 is an unhandled exception. Read the server log with `bialet_log_read` and fix \
+             the stack trace before changing code or tests; the message names the class/property \
+             that is missing.",
+        );
+    }
+    if output.contains("Argument must be a string") {
+        return Some(
+            "A parser received null (`Num.fromString(null)`, `Date.new(null)`, ...). Guard the \
+             field or stringify with a default: `Num.fromString(\"%(value || 0)\") || 0`. \
+             Form fields are null when absent.",
+        );
+    }
+    if output.contains("Expect ':' after map key") {
+        return Some(
+            "Inside `{{ }}` a `{` or an HTML block is parsed as a map literal. Compute the \
+             HTML in a Wren variable first (`var extra = cond ? <div>...</div> : \"\"`) and \
+             interpolate `{{ extra }}`.",
+        );
+    }
     if output.contains("Expect '(' after '%'")
         || output.contains("Expect end of string interpolation")
     {
@@ -1385,6 +1406,9 @@ mod tests {
                 .unwrap()
                 .contains("x25")
         );
+        assert!(wren_trap_hint("HTTP/1.1 500 Internal Server Error")
+            .unwrap()
+            .contains("log"));
         assert!(wren_trap_hint("List does not implement 'reverse'.")
             .unwrap()
             .contains("for"));

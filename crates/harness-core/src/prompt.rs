@@ -97,9 +97,11 @@ How to work:
   is no `describe`/`it`/`expect` API, and `Test` is already in scope, so never
   `import "bialet/test" for Test` (that fails with "Module variable is already
   defined"). A form change must assert that POST → read round-trip (submit the
-  values, then read the page back), not just that the page renders. Never weaken
-  an assertion to make a failing test pass: fix the app, or explain why the
-  expectation itself was wrong.
+  values, then read the page back), not just that the page renders. Add at least
+  one boundary test: today vs a future date, an empty table, the first/last day
+  of the month, a leap day. A green suite with one mid-month date misses
+  off-by-one filters. Never weaken an assertion to make a failing test pass: fix
+  the app, or explain why the expectation itself was wrong.
 - Keep the test suite small and quiet. All files in `_tests/` share one
   temporary database per run, so do not assume isolation; seed shared rows in
   `_tests/_init.wren`. Never `System.print` a whole table, and delete any
