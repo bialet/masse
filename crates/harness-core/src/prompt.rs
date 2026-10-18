@@ -61,7 +61,8 @@ How to work:
     only getters (`count`, `toString`) omit the parentheses. `Map` uses
     `m["key"]`, not `m.get("key")`.
   - Strings only support `==` / `!=`: `"2026-01-01" < "2026-02-01"` crashes.
-    Parse to `Date` or `Num` before `<` / `>`.
+    Parse to `Date` or `Num` before `<` / `>`. `""` is truthy: validate empty
+    text with `text.trim().count == 0`, not `!text`.
   - `toString`, `count`, `keys` and `values` are getters: write `val.toString`.
     `trim` is a method: the canonical setter is `val.toString.trim()`.
     `val.toString()` and `val.toString.trim` both fail at runtime.

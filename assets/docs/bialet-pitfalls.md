@@ -217,7 +217,9 @@ if (Request.isPost) {
 `Session.csrf` / `Session.csrfOk` are **not** static: they are members of
 `session = Session.new()`. In tests, `Test.post` cannot reuse the token from a
 previous `Test.get` (there is no cookie jar), so a CSRF-protected form returns
-200 instead of 302. Make the check test-aware with a config flag and set it
+200 instead of 302. The same applies to any session value: a name set by one
+`Test.get` is not visible to the next `Test.post`. Pass the value in the body
+(or test the domain method directly) instead of relying on session state. Make the check test-aware with a config flag and set it
 once in `_tests/_init.wren`:
 
 ```wren
@@ -285,7 +287,18 @@ exercises anything. Use `INSERT OR IGNORE`, or seed distinct values per file.
 `expenses has 7 columns but 6 values supplied` is this mistake. Naming the
 columns also keeps the insert valid when a later migration adds a column.
 
-## 25. Strings do not implement `<` or `>`
+## 25. The form `name` must match `Request.post` exactly
+
+```wren
+<input name="dia" type="date">
+var day = Request.post("day")   // null: the key is "dia"
+```
+
+A mismatch silently yields null; the POST returns 302 but nothing is saved, or
+the controller crashes formatting null. Keep the HTML `name` and the
+`Request.post`/`Request.get` key identical (or use the same constant).
+
+## 26. Strings do not implement `<` or `>`
 
 ```wren
 "2026-01-01" < "2026-02-01"
@@ -301,7 +314,7 @@ Num.fromString(a) < Num.fromString(b)
 
 This is the classic "the list works until the first row exists" 500.
 
-## 26. A failed migration can still be marked as applied
+## 27. A failed migration can still be marked as applied
 
 If the SQL in `Db.migrate` fails (`incomplete input`, a missing column, ...),
 Bialet can still record the version in `BIALET_MIGRATIONS`. Fixing the `.wren`
@@ -314,7 +327,7 @@ DELETE FROM BIALET_MIGRATIONS WHERE version = 'Create coverage table';
 
 Check this before assuming a schema change took effect.
 
-## 26. Do not call `Date.new()` inside a `Db.migrate` callback
+## 28. Do not call `Date.new()` inside a `Db.migrate` callback
 
 `Db.migrate` callbacks run before `Date.init`, so any date construction or date
 arithmetic there crashes the whole process with SIGSEGV (exit 139) and the app
@@ -336,7 +349,41 @@ Db.migrate("Seed", `
 Seed dates with SQL (`date('now')`, `strftime`) or lazily from a route/domain
 method after the app is up.
 
-## 24. `bialet_run` is not a request
+## 29. Private apps need a first-run credential
+
+An empty admin key/password either locks everyone out or opens everything. Seed
+one in the migration (`INSERT OR IGNORE ...`) or add a `/primer-uso` page that
+creates the first user and shows the recovery key. Then verify login end to end;
+a redirect loop on `/entrar` usually means there is no user to log in with.
+
+## 30. `""` is truthy in Wren
+
+```wren
+var name = Request.post("name") || ""
+if (!name) { ... }          // never true for ""
+if (name.trim().count == 0) { ... }   // correct empty check
+```
+
+Only `null` and `false` are falsy. Validate empty text with `trim().count == 0`
+(or `trim() == ""`), not `!text`.
+
+## 30. HTML whitespace makes multi-word `.contains` assertions fragile
+
+```wren
+Test.get("/").contains("1 paciente para")  // fails if the template wraps the line
+```
+
+HTML collapses or inserts whitespace between words. Assert a single stable
+token (a heading, a name, a badge) instead of a multi-word sentence.
+
+## 30. Enforce rules in the domain, not only in the UI
+
+Disabling a button is not validation: a direct `POST` bypasses it. Put the rule
+in the domain method (and a UNIQUE index where the database can express it).
+Example: "one open loan per book" must be checked in `Loan.create`, not only by
+rendering the button as disabled.
+
+## 30. `bialet_run` is not a request
 
 `bialet_run` has no `BIALET_*` tables, no session and no router. `Session.new()`,
 `Config.get(...)` and app queries fail there. Use `_tests/` + `bialet_test`, or

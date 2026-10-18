@@ -293,6 +293,66 @@ fn invalid_arguments_message(tool: &str, bytes: usize) -> String {
     )
 }
 
+/// Turn a known Wren/Bialet runtime error into the one-line fix. The model
+/// often sees the raw error in a server log but does not connect it to the
+/// language rule; this nudge does that at the moment the error appears.
+fn wren_trap_hint(output: &str) -> Option<&'static str> {
+    if output.contains("Expect '(' after '%'")
+        || output.contains("Expect end of string interpolation")
+    {
+        return Some(
+            "A literal `%` in a Wren string must be `\\x25` (write \"100\\x25\"), because `%(` \
+             starts interpolation. In an HTML template write `%` directly (or `&#37;`).",
+        );
+    }
+    if output.contains("does not implement 'toString()'") {
+        return Some(
+            "`toString` is a getter: write `val.toString`, never `val.toString()`. \
+             The canonical setter is `val.toString.trim()`.",
+        );
+    }
+    if output.contains("does not implement 'trim'") {
+        return Some("`trim` is a method: write `val.toString.trim()`, not `val.toString.trim`.");
+    }
+    if output.contains("=(_)") {
+        return Some(
+            "Missing property setter: `obj.field = x` needs an explicit \
+             `field=(value) { _field = value }` in the class. Wren does not synthesize it.",
+        );
+    }
+    if output.contains("String does not implement '<") {
+        return Some(
+            "Strings only support `==` / `!=`. Parse to `Date` or `Num` before using `<` or `>`.",
+        );
+    }
+    if output.contains("Query does not implement") {
+        return Some(
+            "Query methods take at most three positional arguments; pass one List for four or \
+             more: `.query([a,b,c,d])`, `.fetch([a,b,c,d])`, `.toNum([a,b,c,d])`.",
+        );
+    }
+    if output.contains("Map does not implement 'get") {
+        return Some("`Map` has no `get`: use `map[\"key\"]` and `map.containsKey(\"key\")`.");
+    }
+    if output.contains("List does not implement 'reverse'") {
+        return Some("`List` has no `reverse`; build a new list with a `for` loop.");
+    }
+    if output.contains("MapSequence does not implement '[_]'") {
+        return Some(
+            "A Query result is a MapSequence, not a List: do not index it with `[0]`. \
+             Iterate it with `for`, or materialize it with `.fetch`/`.to(Class)` and then index the List.",
+        );
+    }
+    if output.contains("Null does not implement") {
+        return Some(
+            "A method returned null. In Wren a method produces a value only with an explicit \
+             `return`; add it to every multiline method that should return a query/list. \
+             Also guard a null row before calling `.isEmpty`, `.values` or `.format` on it.",
+        );
+    }
+    None
+}
+
 /// Pick the most useful line of a failed tool output: the assertion or the
 /// first compiler/runtime error, not the `exit_code` header. Used in the
 /// change-of-approach nudge so the model can fix the exact code path.
@@ -674,6 +734,8 @@ impl Agent {
         // count of consecutive runs catches that spiral.
         let mut consecutive_bialet_runs: u32 = 0;
         let mut bialet_run_nudged = false;
+        // Known Wren/Bialet errors already explained this turn.
+        let mut trap_nudged: HashSet<&'static str> = HashSet::new();
 
         for _ in 0..self.config.max_iterations {
             let request = ChatRequest {
@@ -847,6 +909,16 @@ impl Agent {
                     && (is_mutating_tool(&call.name) || call.name == "bialet_test")
                 {
                     consecutive_bialet_runs = 0;
+                }
+                if let Some(hint) = wren_trap_hint(&result.output) {
+                    if trap_nudged.insert(hint) {
+                        nudge_after_batch.get_or_insert_with(|| {
+                            format!("{hint}\nThe output was:\n{failure_hint}")
+                        });
+                        emit!(AgentEvent::Notice(
+                            "detected a known Wren/Bialet trap; adding a targeted hint".into()
+                        ));
+                    }
                 }
                 let terminate = result.terminate.clone();
                 let session_status = if result.status == ToolStatus::Ok {
@@ -1281,6 +1353,42 @@ mod tests {
         // A genuinely different failure must not collapse into the same bucket.
         let c = "Query does not implement 'fetch(_,_,_,_,_)'.";
         assert_ne!(failure_signature(a), failure_signature(c));
+    }
+
+    #[test]
+    fn known_wren_traps_get_a_targeted_hint() {
+        assert!(
+            wren_trap_hint("Runtime Error Null does not implement 'isEmpty'.")
+                .unwrap()
+                .contains("return")
+        );
+        assert!(wren_trap_hint("String does not implement 'toString()'.")
+            .unwrap()
+            .contains("getter"));
+        assert!(wren_trap_hint("String does not implement 'trim'.")
+            .unwrap()
+            .contains("trim()"));
+        assert!(wren_trap_hint("Order does not implement 'code=(_)'.")
+            .unwrap()
+            .contains("setter"));
+        assert!(wren_trap_hint("String does not implement '<(_)'.")
+            .unwrap()
+            .contains("Date"));
+        assert!(wren_trap_hint("Map does not implement 'get(_)'.")
+            .unwrap()
+            .contains("map["));
+        assert!(wren_trap_hint("Query does not implement 'query(_,_,_,_)'.")
+            .unwrap()
+            .contains("List"));
+        assert!(
+            wren_trap_hint("Compilation Error line 2 Error: Expect '(' after '%'.")
+                .unwrap()
+                .contains("x25")
+        );
+        assert!(wren_trap_hint("List does not implement 'reverse'.")
+            .unwrap()
+            .contains("for"));
+        assert!(wren_trap_hint("todo bien").is_none());
     }
 
     #[test]
