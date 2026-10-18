@@ -170,23 +170,18 @@ fn looks_like_docs(path: &Path) -> bool {
     if !path.is_dir() {
         return false;
     }
-    if path.join("index.rst").is_file() || path.join("usage.md").is_file() {
-        return true;
-    }
-    // Fall back: any markdown/rst file means it is probably documentation.
-    std::fs::read_dir(path)
-        .ok()
-        .map(|mut rd| {
-            rd.any(|e| {
-                e.ok().map(|e| {
-                    matches!(
-                        e.path().extension().and_then(|x| x.to_str()),
-                        Some("md") | Some("rst")
-                    )
-                }) == Some(true)
-            })
-        })
-        .unwrap_or(false)
+    // Require a Bialet-docs marker. Accepting any folder with a Markdown file
+    // let a project's own `docs/` shadow the complete manual bundled in the
+    // binary (for example masse's own `docs/architecture.md`).
+    [
+        "index.rst",
+        "usage.md",
+        "prompt-guide.md",
+        "datetime.md",
+        "reference.md",
+    ]
+    .iter()
+    .any(|name| path.join(name).is_file())
 }
 
 /// Scan `skills/<name>/SKILL.md` and load every skill.
@@ -395,5 +390,21 @@ mod tests {
             Some("prompt-guide.md")
         );
         assert_eq!(literalinclude_target("no directive here"), None);
+    }
+
+    #[test]
+    fn only_a_bialet_docs_tree_is_detected() {
+        let root = std::env::temp_dir().join(format!("masse-detect-docs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+
+        // A project's own notes folder must not shadow the bundled manual.
+        std::fs::write(root.join("docs/architecture.md"), "# Notes").unwrap();
+        assert_eq!(detect_docs(&root), None);
+
+        std::fs::write(root.join("docs/usage.md"), "# Usage").unwrap();
+        assert_eq!(detect_docs(&root), Some(root.join("docs")));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

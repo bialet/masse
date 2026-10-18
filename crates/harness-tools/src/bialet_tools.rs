@@ -433,7 +433,7 @@ impl Tool for BialetDocs {
     }
 
     fn description(&self) -> &str {
-        "Consult the local Bialet/Wren documentation. Provide `topic` to search, `file` to read a whole page, or `list` to enumerate pages."
+        "Consult the bundled Bialet/Wren documentation (the complete Bialet manual plus the Wren core references). Provide `topic` to search, `file` to read a whole page, or `list` to enumerate pages."
     }
 
     fn schema(&self) -> Json {
@@ -475,16 +475,16 @@ impl Tool for BialetDocs {
                 }
             }
             let local: std::collections::HashSet<String> = names.iter().cloned().collect();
-            for doc in crate::embedded_docs::EMBEDDED_DOCS {
-                if !local.contains(doc.name) {
-                    names.push(doc.name.to_string());
+            for name in crate::embedded_docs::names() {
+                if !local.contains(name) {
+                    names.push(name.to_string());
                 }
             }
             names.sort();
             return ToolResult::ok(if names.is_empty() {
                 "(no docs found)".into()
             } else {
-                format!("{}\n", names.join("\n"))
+                format!("{}\n\n({} pages)\n", names.join("\n"), names.len())
             });
         }
 
@@ -501,17 +501,11 @@ impl Tool for BialetDocs {
                     };
                 }
             }
-            let base = std::path::Path::new(&rel)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(rel.as_str());
-            if let Some(doc) =
-                crate::embedded_docs::get(base).or_else(|| crate::embedded_docs::get(&rel))
-            {
-                let (text, _) = truncate_lines(doc.content, 1000);
+            if let Some(doc) = crate::embedded_docs::get(&rel) {
+                let (text, _) = truncate_lines(doc.content, 2000);
                 return ToolResult::ok(text);
             }
-            return ToolResult::err(format!("doc not found: {rel}"));
+            return ToolResult::err(not_found_message(&rel));
         }
 
         let topic = match opt_str(&args, "topic") {
@@ -568,6 +562,31 @@ impl Tool for BialetDocs {
             ToolResult::ok(out)
         }
     }
+}
+
+/// Turn a missing page into a useful pointer instead of a dead end.
+fn not_found_message(query: &str) -> String {
+    let mut msg = format!("doc not found: {query}\n");
+    let similar = crate::embedded_docs::similar_names(query, 5);
+    if !similar.is_empty() {
+        msg.push_str("\nPages with a similar name:\n");
+        for name in similar {
+            msg.push_str(&format!("- {name}\n"));
+        }
+    }
+    let heading = query.split(['.', '#', '-']).next().unwrap_or(query);
+    let pages = crate::embedded_docs::pages_with_heading(heading, 5);
+    if !pages.is_empty() {
+        msg.push_str("\nPages with a matching heading:\n");
+        for (name, title) in pages {
+            msg.push_str(&format!("- {name} (# {title})\n"));
+        }
+    }
+    msg.push_str(
+        "\nUse `bialet_docs list=true` to see every page, or \
+         `bialet_docs topic=\"...\"` to search the contents.\n",
+    );
+    msg
 }
 
 /// Append context windows around every line of `content` containing `needle`.
@@ -686,5 +705,88 @@ mod tests {
         assert!(out.output.contains("Test.get"), "got: {}", out.output);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The complete Bialet manual is bundled even in a project with no local
+    /// docs; this is the regression that left `datetime.md` unreachable.
+    #[tokio::test]
+    async fn reads_the_bundled_bialet_manual() {
+        let dir = std::env::temp_dir().join(format!("masse-docs-bundled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolContext::new(&dir);
+
+        for (page, expected) in [
+            ("datetime.md", "Date and Time"),
+            ("reference.md", "Config"),
+            ("usage.md", "Usage"),
+            ("getting-started/1-introduction.md", "Introduction"),
+            ("1-introduction.md", "Introduction"),
+            ("bialet-recipes.md", "Money"),
+        ] {
+            let out = BialetDocs
+                .call(&ctx, serde_json::json!({"file": page}))
+                .await;
+            assert_eq!(out.status, ToolStatus::Ok, "{page}: {}", out.output);
+            assert!(
+                out.output.to_lowercase().contains(&expected.to_lowercase()),
+                "{page} did not mention {expected}: {}",
+                out.output
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn list_includes_the_full_manual() {
+        let dir = std::env::temp_dir().join(format!("masse-docs-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolContext::new(&dir);
+
+        let out = BialetDocs
+            .call(&ctx, serde_json::json!({"list": true}))
+            .await;
+        assert_eq!(out.status, ToolStatus::Ok);
+        for page in [
+            "datetime.md",
+            "deployment.md",
+            "security.md",
+            "getting-started/1-introduction.md",
+            "wren-num.md",
+        ] {
+            assert!(out.output.contains(page), "list is missing {page}");
+        }
+        let pages: usize = out
+            .output
+            .split("pages)")
+            .next()
+            .and_then(|s| s.rsplit('(').next())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        assert!(pages >= 50, "only {pages} pages listed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn missing_page_suggests_where_to_look() {
+        let dir = std::env::temp_dir().join(format!("masse-docs-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolContext::new(&dir);
+
+        let out = BialetDocs
+            .call(&ctx, serde_json::json!({"file": "date-reference"}))
+            .await;
+        assert_eq!(out.status, ToolStatus::Error);
+        assert!(
+            out.output.contains("reference.md") || out.output.contains("datetime.md"),
+            "missing page should point at the Date docs: {}",
+            out.output
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

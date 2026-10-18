@@ -441,6 +441,7 @@ async fn run() -> Result<()> {
             root: root.display().to_string(),
             log_path: Some(runtime_log.clone()),
             debug: cli.debug,
+            turn: Arc::new(std::sync::Mutex::new(harness_server::TurnState::default())),
         };
         harness_server::serve(state, addr).await
     };

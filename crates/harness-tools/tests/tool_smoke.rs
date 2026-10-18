@@ -262,6 +262,11 @@ async fn bialet_docs_serves_bundled_pages() {
         .await;
     assert!(!r.is_error(), "{}", r.output);
     assert!(r.output.contains("notContains"), "{}", r.output);
+
+    let r = reg
+        .call("bialet_docs", &ctx, json!({"file": "bialet-recipes.md"}))
+        .await;
+    assert!(!r.is_error(), "{}", r.output);
     assert!(
         r.output.contains("Module variable is already defined"),
         "{}",

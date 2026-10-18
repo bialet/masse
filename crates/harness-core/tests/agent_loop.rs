@@ -770,3 +770,201 @@ async fn repeated_failures_with_varying_args_nudge_a_change_of_approach() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn invalid_json_arguments_are_reported_honestly() {
+    let root = std::env::temp_dir().join(format!("masse-badjson-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut responses = VecDeque::new();
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "call_1".into(),
+            name: "write_file".into(),
+            // A completion cut off mid-string: invalid JSON.
+            arguments: r#"{"path":"hi.txt","content":"hola"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "call_2".into(),
+            name: "finish".into(),
+            arguments: r#"{"summary":"blocked","success":false}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(responses),
+    });
+    let session = Arc::new(SessionStore::new(root.join("session.csv")));
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(builtin_registry()),
+        ToolContext::new(&root),
+        session.clone(),
+        AgentConfig {
+            model: "test".into(),
+            system_prompt: "test".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let reply = agent.send("build it", None).await.unwrap();
+    assert_eq!(reply, "blocked");
+    assert!(
+        !root.join("hi.txt").exists(),
+        "an invalid call must not execute"
+    );
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|m| m.content.contains("not valid JSON")),
+        "the model must be told its arguments were invalid"
+    );
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|m| m.content.contains("missing required")),
+        "a truncated payload must not masquerade as a missing argument"
+    );
+
+    let events = session.read_all().await.unwrap();
+    let call = events
+        .iter()
+        .find(|e| e.event_type == "tool_call")
+        .expect("the call is logged");
+    assert!(call.args.contains("_invalid_json=true"), "{}", call.args);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn finish_success_without_artifacts_is_rejected_once() {
+    let root = std::env::temp_dir().join(format!("masse-noartifact-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let mut responses = VecDeque::new();
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "call_1".into(),
+            name: "finish".into(),
+            arguments: r#"{"summary":"listo","success":true}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+    responses.push_back(ChatResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "call_2".into(),
+            name: "finish".into(),
+            arguments: r#"{"summary":"necesito una decisión","success":false}"#.into(),
+        }],
+        finish_reason: Some("tool_calls".into()),
+    });
+
+    let provider = Arc::new(ScriptedProvider {
+        responses: Mutex::new(responses),
+    });
+    let mut agent = build_agent(provider, &root).await;
+    let reply = agent.send("build it", None).await.unwrap();
+
+    assert_eq!(reply, "necesito una decisión");
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|m| m.content.contains("did not create or edit any file")),
+        "the false success must be challenged"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_probe_loop_is_aborted_instead_of_burning_the_budget() {
+    let root = std::env::temp_dir().join(format!("masse-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Arc::new(ProbeLoopProvider {
+        calls: calls.clone(),
+    });
+    let session = Arc::new(SessionStore::new(root.join("session.csv")));
+    let session2 = session.clone();
+    let mut agent = Agent::new(
+        provider,
+        Arc::new(builtin_registry()),
+        ToolContext::new(&root),
+        session,
+        AgentConfig {
+            model: "test".into(),
+            system_prompt: "test".into(),
+            max_iterations: 40,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = agent
+        .send("build it", None)
+        .await
+        .expect_err("the probe loop must be aborted");
+    let text = err.to_string();
+    let events = session2.read_all().await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type == "tool_call")
+            .count(),
+        10,
+        "the guard should stop at the tenth call"
+    );
+    assert!(
+        text.contains("probe loop") || text.contains("same arguments"),
+        "unexpected stop reason: {text}"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) <= 12,
+        "the loop should stop early, got {} model calls",
+        calls.load(Ordering::SeqCst)
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Writes `probe1.txt`, `probe2.txt`, ... on every call: same shape, changed
+/// constant, which is exactly the loop seen in the failed runs.
+struct ProbeLoopProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for ProbeLoopProvider {
+    fn name(&self) -> &str {
+        "probe-loop"
+    }
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(ChatResponse {
+            tool_calls: vec![ToolCall {
+                id: format!("call_{n}"),
+                name: "write_file".into(),
+                arguments: format!(r#"{{"path":"probe{n}.txt","content":"x"}}"#),
+            }],
+            ..Default::default()
+        })
+    }
+}

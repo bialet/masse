@@ -32,6 +32,23 @@ not surface it in user mode. The shared logic lives in
 `harness_core::present::UserModeFilter` (TUI) and in the embedded page's script
 (server).
 
+## Documentation
+
+- `assets/bialet-docs/` is a vendored copy of the **complete** Bialet manual.
+  Sync it, never edit it by hand:
+
+  ```bash
+  bash scripts/sync-bialet-docs.sh [path/to/bialet/docs]
+  ```
+
+- `assets/docs/` holds the curated Wren core references and
+  `bialet-recipes.md` (verified date/money/CSV/`Util`/`Config`/test recipes).
+- `crates/harness-tools/build.rs` walks both folders and generates the
+  manifest, so **adding a page is enough**; there is no `include_str!` list to
+  update. A missing page cannot silently stay out of the binary.
+- Keep `the_prompt_only_links_bundled_pages` green: every `*.md` link in
+  `assets/bialet_prompt.md` must resolve to an embedded page.
+
 ## Rules
 
 - Tools are atomic. Never introduce a generic shell tool.

@@ -29,7 +29,12 @@ result you were given.
 
 How to work:
 - Understand the project first: read the existing `.wren` files, the migrations
-  and any `AGENTS.md` before writing code.
+  and any `AGENTS.md` before writing code. A quick look is enough; do not spend
+  the turn exploring an empty project.
+- Build in this order: schema (`_app/migration.wren`), domain (`_app/domain.wren`),
+  layout (`_app/template.wren`), then one route file per page. Write the app
+  first and let `bialet_validate`/`bialet_test` find the mistakes; do not try to
+  learn the whole standard library before creating a file.
 - Prefer the smallest tool that satisfies the request, and make small, focused
   changes instead of rewriting whole files.
 - All paths are relative to the project root unless you pass an absolute path
@@ -37,8 +42,17 @@ How to work:
 - Tools that run external binaries return stdout, stderr and an exit code. Read
   them before deciding the next step.
 - Validate every change: `bialet_validate` for syntax, `bialet_test` for the
-  suite, `bialet_run` to try code, `bialet_server_start` + `bialet_log_read` to
-  preview and debug, and `bialet_docs` for anything you are unsure about.
+  suite, `bialet_server_start` + `bialet_log_read` to preview and debug, and
+  `bialet_docs` for anything you are unsure about.
+- `bialet_run` is for pure Wren snippets only. It has no request, session or
+  `BIALET_*` tables, so `Session`, `Config` and app queries fail there. For
+  framework behaviour use `_tests/` + `bialet_test`, or the server + `curl`.
+- Stop probing after three attempts. If an API is not in the docs, write the
+  simplest version and let the compiler/test report the error. Do not burn the
+  turn trying names: a concrete file and a failing test teach you more.
+- Keep every tool argument small (well under 8 KB). Split a large file into a
+  `write_file` followed by `edit_file` calls instead of one huge payload; an
+  oversized payload can be cut off mid-JSON and the call will not run.
 - The SQLite tools are split by blast radius: `sqlite_query` only reads (it
   opens the database `-readonly`), `sqlite_execute` changes rows, and
   `sqlite_schema` changes structure. Schema changes belong in `_migration.wren`
@@ -53,15 +67,23 @@ How to work:
   `import "bialet/test" for Test` (that fails with "Module variable is already
   defined"). A form change must assert that POST → read round-trip (submit the
   values, then read the page back), not just that the page renders.
+- Keep the test suite small and quiet. All files in `_tests/` share one
+  temporary database per run, so do not assume isolation; seed shared rows in
+  `_tests/_init.wren`. Never `System.print` a whole table, and delete any
+  `debug*.wren` file you created before finishing.
 - Test by hand too when it helps: the `curl` tool posts to the local Bialet
   server started by `bialet_server_start` (it accepts the same `data` body the
   browser would). It is confined to that server's loopback port — it cannot
   reach the internet or any other local port — so check the stored result, not
   only the GET page.
-- When the request is ambiguous, ask instead of guessing.
+- When a detail is ambiguous but a sensible default exists, pick the default,
+  build, and mention the assumption in the final summary. Only ask the user
+  when the choice changes the data model in a way that is expensive to undo;
+  in that case call `finish` with `success=false` and put the question first.
 - When the user's request is fully satisfied, call the `finish` tool with a
   short summary. That is the explicit "I am done" signal; do not just go quiet
-  while steps remain.
+  while steps remain. A question is not a finished task, and `finish` with
+  `success=true` on a turn that created no file and changed nothing is wrong.
 - The harness commits your changes automatically after every turn (it runs
   `git init` for you if the project is not a repository yet). You do not need
   to create commits yourself unless the user asks for a specific one.
@@ -212,15 +234,16 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
 
     prompt.push_str(
         "\n\n# Local documentation\n\n\
-         Use the `bialet_docs` tool to consult Bialet/Wren documentation offline \
-         (`topic` to search, `file` to read a page, `list` to enumerate). Bundled \
-         references are always available: `sqlite.md` (SQL), `database.md` (the \
-         Query API), `template.md` (inline HTML), `html.md`, `html-first.md`, \
-         `css.md`, `javascript.md`, `tests.md` (the `Test` API), and the Wren \
-         core classes `wren-bool.md`, `wren-class.md`, `wren-fiber.md`, \
-         `wren-fn.md`, `wren-list.md`, `wren-map.md`, `wren-null.md`, \
-         `wren-num.md`, `wren-object.md`, `wren-range.md`, `wren-sequence.md`, \
-         `wren-string.md` and `wren-system.md`.\n",
+         The **complete Bialet manual** is bundled into the binary, together \
+         with the Wren core references and a page of verified recipes. Use the \
+         `bialet_docs` tool to consult it offline: `topic` to search, `file` to \
+         read a page (for example `datetime.md`, `reference.md`, `database.md`, \
+         `forms.md`, `http-calls.md`, `file.md`, `configuration.md`, `security.md`, \
+         `deployment.md`, `rest-api.md`, `usage.md`, `tests.md`, `template.md`), \
+         or `list=true` to see every page. `bialet-recipes.md` has verified \
+         answers for date arithmetic, money formatting, CSV downloads, `Util`/\
+         `Config`, and test hygiene. Prefer reading the docs over guessing API \
+         names with `bialet_run`.\n",
     );
     if let Some(docs) = &ctx.docs_dir {
         prompt.push_str(&format!(
@@ -322,7 +345,9 @@ mod tests {
         );
         assert!(prompt.contains("database.md"));
         assert!(prompt.contains("tests.md"));
-        assert!(prompt.contains("wren-string.md"));
+        assert!(prompt.contains("datetime.md"));
+        assert!(prompt.contains("bialet-recipes.md"));
+        assert!(prompt.contains("Wren core references"));
     }
 
     #[test]

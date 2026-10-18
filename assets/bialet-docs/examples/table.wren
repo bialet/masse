@@ -1,0 +1,44 @@
+// We use the `query()` method to execute SQL statements.
+// In this case we create a table named `counter` with two columns: `name` and `value`.
+// This should be done with migrations; it's included here so the example is self-contained.
+`CREATE TABLE IF NOT EXISTS counter (name TEXT PRIMARY KEY, value INTEGER)`.query
+
+// We use the `fetch()` method to get the query result as an array of objects.
+var counters = `SELECT * FROM counter ORDER BY name ASC`.fetch
+
+// We use the `return` to finish the script and send the response to the client.
+// The `{{ ... }}` syntax is used to interpolate the value of the `counters` variable.
+// and the `count` variable.
+//
+// The ternary operator is used to check if the `counters` array is empty or not.
+// That's the way to have an IF statement in the interpolated string.
+//
+// The `map` method is used to iterate over the `counters` array.
+// That's the way to have a FOR statement in the interpolated string.
+//
+// Apart from the interpolation, the strings are regular HTML.
+return <!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <h1>Show all the counters saved in the database</h1>
+    {{ counters.count > 0 ?
+      <table>
+        <tr>
+          <th>Name</th>
+          <th>Value</th>
+        </tr>
+        {{ counters.map{|counter| <tr>
+            <td>{{ counter["name"] }}</td>
+            <td>{{ counter["value"] }}</td>
+          </tr> } }}
+      </table> :
+      <p>No counters found</p>
+    }}
+    <p><a href=".">Back ↩️</a></p>
+  </body>
+</html>

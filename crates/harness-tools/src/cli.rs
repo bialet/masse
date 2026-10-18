@@ -18,6 +18,13 @@ pub struct CmdOutput {
     pub error: Option<String>,
 }
 
+/// Maximum bytes of stdout/stderr handed to the model per command.
+///
+/// A test that prints a whole table (or a loop that debug-prints) can emit
+/// megabytes. Without a cap that output goes straight into the context window
+/// and can overflow a 1M-token request in a single turn.
+pub const MAX_AGENT_OUTPUT_BYTES: usize = 48 * 1024;
+
 impl CmdOutput {
     pub fn success(&self) -> bool {
         self.error.is_none() && !self.timed_out && self.exit_code == Some(0)
@@ -39,20 +46,56 @@ impl CmdOutput {
         }
         if !self.stdout.is_empty() {
             out.push_str("stdout:\n");
-            out.push_str(&self.stdout);
+            out.push_str(&cap_bytes(&self.stdout, MAX_AGENT_OUTPUT_BYTES));
             if !self.stdout.ends_with('\n') {
                 out.push('\n');
             }
         }
         if !self.stderr.is_empty() {
             out.push_str("stderr:\n");
-            out.push_str(&self.stderr);
+            out.push_str(&cap_bytes(&self.stderr, MAX_AGENT_OUTPUT_BYTES));
             if !self.stderr.ends_with('\n') {
                 out.push('\n');
             }
         }
         out
     }
+}
+
+/// Keep the head and the tail of an oversized output, with a marker in
+/// between. The tail matters: compiler/test summaries live at the end.
+pub fn cap_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let head_len = max_bytes / 3;
+    let tail_len = max_bytes - head_len;
+    let head_end = floor_char_boundary(text, head_len);
+    let tail_start = ceil_char_boundary(text, text.len() - tail_len);
+    let omitted = tail_start.saturating_sub(head_end);
+    format!(
+        "{}\n[masse] output truncated: {omitted} bytes omitted; showing the first {} and the last {} bytes\n{}",
+        &text[..head_end],
+        head_end,
+        text.len() - tail_start,
+        &text[tail_start..]
+    )
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 /// The program to run plus its argument array (never a shell string).
@@ -203,4 +246,44 @@ pub fn truncate_lines(text: &str, max_lines: usize) -> (String, bool) {
         }
     }
     (text.to_string(), false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_output_is_untouched() {
+        assert_eq!(cap_bytes("hola", 100), "hola");
+    }
+
+    #[test]
+    fn huge_output_keeps_head_and_tail() {
+        let text = format!("{}MEDIO{}", "a".repeat(1000), "z".repeat(1000));
+        let capped = cap_bytes(&text, 300);
+        assert!(capped.len() < 600, "cap did not shrink the output");
+        assert!(capped.starts_with("aaa"));
+        assert!(capped.ends_with("zzz"));
+        assert!(capped.contains("bytes omitted"));
+    }
+
+    #[test]
+    fn cap_respects_utf8_boundaries() {
+        let text = "ñ".repeat(1000);
+        let capped = cap_bytes(&text, 101);
+        assert!(capped.starts_with('ñ'));
+        assert!(capped.ends_with('ñ'));
+    }
+
+    #[test]
+    fn agent_text_caps_stdout() {
+        let out = CmdOutput {
+            stdout: "x".repeat(MAX_AGENT_OUTPUT_BYTES * 2),
+            exit_code: Some(0),
+            ..Default::default()
+        };
+        let text = out.to_agent_text();
+        assert!(text.len() < MAX_AGENT_OUTPUT_BYTES * 2);
+        assert!(text.contains("output truncated"));
+    }
 }

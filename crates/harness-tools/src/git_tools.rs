@@ -6,7 +6,7 @@ use serde_json::Value as Json;
 use crate::cli::CmdSpec;
 use crate::tool::{
     opt_bool, opt_str, opt_str_array, opt_u64, req_str, schema_object, Tool, ToolContext,
-    ToolResult,
+    ToolResult, ToolStatus,
 };
 
 fn git(args: Vec<String>) -> CmdSpec {
@@ -141,7 +141,15 @@ impl Tool for GitLog {
             a.push("--".into());
             a.push(p);
         }
-        run_git(ctx, a, opt_u64(&args, "timeout_secs")).await
+        let result = run_git(ctx, a, opt_u64(&args, "timeout_secs")).await;
+        // A freshly created repository has no HEAD yet. That is not an error:
+        // the model just needs to know there is no history to inspect.
+        if result.status == ToolStatus::Error
+            && result.output.contains("does not have any commits yet")
+        {
+            return ToolResult::ok("(no commits yet)\n");
+        }
+        result
     }
 }
 

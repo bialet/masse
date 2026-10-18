@@ -1,0 +1,69 @@
+var date = Date.new()
+var current = Date.now
+
+// We use the `isPost` property to check if the request method is POST
+if (Request.isPost) {
+  // Update the date — `||` works because `null` is falsey in Wren
+  var d = Request.post("date") || ""
+  var t = Request.post("time") || ""
+  date = Date.new("%(d) %(t)", Request.post("tz") || "")
+}
+
+// Log the dates
+System.log("Date: %(date) - Current: %(current)")
+
+// We use the `return` to finish the script and send the response to the client.
+// The `{{ ... }}` syntax is used to interpolate the properties of the date object
+// and also any other string.
+// Apart from the interpolation, the string is regular HTML.
+return <!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <h1>Date and Time functions</h1>
+    <p>Date and time: {{date}}</p>
+    <p>Current date and time: {{current}}</p>
+    <p>{{ date > current ? "Date is greater than current" : "" }}</p>
+    <p>{{ date < current ? "Date is less than current" : "" }}</p>
+    <p>{{ date == current ? "Date is equal to current" : "" }}</p>
+    <p>{{ date != current ? "Date is not equal to current" : "" }}</p>
+    <p>Timezone: {{date.tz}}</p>
+    <p>Year: {{date.year}}</p>
+    <p>Month: {{date.month}}</p>
+    <p>Day: {{date.day}}</p>
+    <p>Hour: {{date.hours}}</p>
+    <p>Minute: {{date.minutes}}</p>
+    <p>Second: {{date.seconds}}</p>
+    <p>Timestamp: {{date.unix}}</p>
+    <p>US Format: {{date.format('#m/#d/#Y')}}</p>
+    <h2>Change date</h2>
+    <form method="POST">
+      <p>
+        <label>
+          Date
+          <input type="date" name="date" value="{{ date.format('#Y-#m-#d') }}">
+        </label>
+      </p>
+      <p>
+        <label>
+          Time
+          <input type="input" name="time" value="{{ date.format('#H:#M:#S') }}">
+        </label>
+      </p>
+      <p>
+        <label>
+          Timezone
+          <input type="input" name="tz" value="{{ date.tz }}">
+        </label>
+      </p
+      <p>
+        <button>Change</button>
+      </p>
+    </form>
+    <p><a href=".">Back ↩️</a></p>
+  </body>
+</html>

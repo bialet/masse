@@ -26,6 +26,29 @@ use harness_tools::ToolRegistry;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::broadcast::error::RecvError;
 
+/// Live turn state exposed by `/api/session`.
+///
+/// `session.csv` only records the conversation; it has no event for "the model
+/// stopped on its own". External runners need that, or they wait forever after
+/// a turn that did not call `finish`.
+#[derive(Clone, Debug)]
+pub struct TurnState {
+    pub running: bool,
+    /// `none`, `finished`, `stopped`, `error` or `cancelled`.
+    pub outcome: &'static str,
+    pub success: Option<bool>,
+}
+
+impl Default for TurnState {
+    fn default() -> Self {
+        TurnState {
+            running: false,
+            outcome: "none",
+            success: None,
+        }
+    }
+}
+
 /// Shared server state.
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +62,8 @@ pub struct AppState {
     pub log_path: Option<PathBuf>,
     /// Developer mode: the UI shows the full log. Off by default.
     pub debug: bool,
+    /// Whether a turn is running and how the last one ended.
+    pub turn: Arc<std::sync::Mutex<TurnState>>,
 }
 
 /// Bind `addr` and serve until the process is stopped.
@@ -55,7 +80,9 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
             post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route("/ws", get(ws_handler))
-        .with_state(state);
+        .with_state(state.clone());
+
+    spawn_turn_tracker(state.handle.clone(), state.turn.clone());
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing_line(format!("masse server listening on http://{addr}"));
@@ -70,6 +97,55 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
 
 fn tracing_line(line: impl AsRef<str>) {
     println!("[masse] {}", line.as_ref());
+}
+
+/// Follow the broadcast stream and mirror the turn lifecycle into shared state.
+/// The front end and any HTTP polling client can then tell the difference
+/// between "still thinking", "finished with finish" and "stopped without it".
+fn spawn_turn_tracker(handle: AgentHandle, turn: Arc<std::sync::Mutex<TurnState>>) {
+    let mut rx = handle.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => apply_turn_event(&turn, &event),
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+fn apply_turn_event(turn: &Arc<std::sync::Mutex<TurnState>>, event: &AgentEvent) {
+    let next = match event {
+        AgentEvent::UserMessage(_) => Some(TurnState {
+            running: true,
+            outcome: "none",
+            success: None,
+        }),
+        AgentEvent::Finished { success, .. } => Some(TurnState {
+            running: false,
+            outcome: "finished",
+            success: Some(*success),
+        }),
+        AgentEvent::TurnFinished => Some(TurnState {
+            running: false,
+            outcome: "stopped",
+            success: None,
+        }),
+        AgentEvent::Error(message) => Some(TurnState {
+            running: false,
+            outcome: if message.contains("cancel") {
+                "cancelled"
+            } else {
+                "error"
+            },
+            success: Some(false),
+        }),
+        _ => None,
+    };
+    if let (Some(next), Ok(mut state)) = (next, turn.lock()) {
+        *state = next;
+    }
 }
 
 async fn index(State(state): State<AppState>) -> Html<String> {
@@ -112,9 +188,15 @@ async fn session_events(State(state): State<AppState>) -> Json<JsonValue> {
         .rev()
         .find(|e| e.event_type == "tool_result" && e.tool == "finish")
         .map(|e| e.status == "ok");
+    let turn = state.turn.lock().map(|t| t.clone()).unwrap_or_default();
     Json(json!({
         "session": state.session.path().display().to_string(),
         "finished": finished,
+        "turn": {
+            "state": if turn.running { "running" } else { "idle" },
+            "outcome": turn.outcome,
+            "success": turn.success,
+        },
         "events": events.iter().map(session_event_json).collect::<Vec<_>>(),
     }))
 }
@@ -159,6 +241,13 @@ async fn post_message(
             Json(json!({ "error": "missing `text`" })),
         );
     }
+    if let Ok(mut turn) = state.turn.lock() {
+        *turn = TurnState {
+            running: true,
+            outcome: "none",
+            success: None,
+        };
+    }
     let ok = state.handle.send_user(text);
     if ok {
         (
@@ -166,6 +255,9 @@ async fn post_message(
             Json(json!({ "status": "queued" })),
         )
     } else {
+        if let Ok(mut turn) = state.turn.lock() {
+            turn.running = false;
+        }
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "agent actor stopped" })),
@@ -715,6 +807,47 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(session_event_json(&event)["html"], "");
+    }
+
+    #[test]
+    fn turn_state_tracks_every_terminal_outcome() {
+        let turn = Arc::new(std::sync::Mutex::new(TurnState::default()));
+
+        apply_turn_event(&turn, &AgentEvent::UserMessage("go".into()));
+        {
+            let state = turn.lock().unwrap();
+            assert!(state.running);
+            assert_eq!(state.outcome, "none");
+        }
+
+        apply_turn_event(
+            &turn,
+            &AgentEvent::Finished {
+                summary: "done".into(),
+                success: true,
+            },
+        );
+        {
+            let state = turn.lock().unwrap();
+            assert!(!state.running);
+            assert_eq!(state.outcome, "finished");
+            assert_eq!(state.success, Some(true));
+        }
+
+        apply_turn_event(&turn, &AgentEvent::UserMessage("again".into()));
+        apply_turn_event(&turn, &AgentEvent::TurnFinished);
+        {
+            let state = turn.lock().unwrap();
+            assert!(!state.running);
+            assert_eq!(state.outcome, "stopped", "a turn without finish is visible");
+        }
+
+        apply_turn_event(&turn, &AgentEvent::UserMessage("again".into()));
+        apply_turn_event(&turn, &AgentEvent::Error("turn cancelled".into()));
+        {
+            let state = turn.lock().unwrap();
+            assert_eq!(state.outcome, "cancelled");
+        }
     }
 
     #[test]

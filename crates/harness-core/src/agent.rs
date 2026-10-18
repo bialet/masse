@@ -1,12 +1,14 @@
 //! The agent runtime: the tool-calling loop and the actor that owns it.
 
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use futures::FutureExt;
 use harness_session::{encode_json_args, Event, SessionStore, Status as SessionStatus};
-use harness_tools::cli::{run as run_cmd, CmdSpec};
+use harness_tools::cli::{cap_bytes, run as run_cmd, CmdSpec};
 use harness_tools::{ToolContext, ToolRegistry, ToolResult, ToolStatus};
 use tokio::sync::{broadcast, mpsc};
 
@@ -100,27 +102,191 @@ const STUCK_NUDGE: &str = "You have now called the same tool several times in a 
 Stop and change approach: read the failure carefully, try a different tool (for example `bialet_docs` to look up the correct API, `grep`/`read_file` to inspect the real code, or `bialet_validate` to check syntax), \
 or state in one line exactly what is blocking you. Do not issue the same call again.";
 
-/// How many consecutive same-signature failures of one tool trigger STUCK_NUDGE.
+/// How many same-signature failures of one tool trigger STUCK_NUDGE.
 const STUCK_THRESHOLD: u32 = 4;
 
+/// After this many identical failures the turn is aborted: two nudges have
+/// already been ignored, so more iterations cannot help.
+const STUCK_STOP_THRESHOLD: u32 = 8;
+
+/// Hard ceiling for one tool-call argument payload. Larger payloads are
+/// rejected before dispatch: they are usually a sign the model is about to
+/// repeat a whole file instead of editing it.
+const MAX_TOOL_ARGS_BYTES: usize = 64 * 1024;
+
+/// Ceiling for any single tool output before it enters the transcript. A test
+/// that prints a whole table can otherwise overflow the context window.
+const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// The same call shape (arguments with numbers normalized) this many times in
+/// one turn means the model is probing, not working.
+const CALL_SHAPE_NUDGE_THRESHOLD: u32 = 5;
+
+/// Abort when one call shape reaches this count, even if the results differed.
+const CALL_SHAPE_STOP_THRESHOLD: u32 = 10;
+
+/// Consecutive non-mutating calls before the "write something" nudge and the
+/// hard stop. Successful file writes reset the counter.
+const PROGRESS_NUDGE_THRESHOLD: u32 = 24;
+const PROGRESS_STOP_THRESHOLD: u32 = 48;
+
+const INVALID_ARGS_NUDGE: &str = "Your previous tool call did not contain valid JSON arguments. \
+This usually means the payload was cut off because it was too long: nothing ran. Re-issue it with a smaller payload — \
+write the file in two steps (`write_file` with the first half, then `edit_file` to append), or run a shorter snippet. \
+Do not send the same oversized call again.";
+
+const CALL_SHAPE_NUDGE: &str = "You have now issued the same call many times with only cosmetic changes (numbers differ, shape does not). \
+The result will not change. Stop probing: read the relevant page with `bialet_docs`, then write the file that needs writing. \
+If you are stuck, say in one line what is blocking you instead of repeating the call.";
+
+const PROGRESS_NUDGE: &str = "You have made many tool calls without creating or editing a single file. \
+Stop exploring and build: write `_app/migration.wren`, `_app/domain.wren`, `_app/template.wren` and the route files now. \
+If an API is unclear, consult `bialet_docs` once and write the simplest version; the validator and the tests will tell you what is wrong.";
+
+const FINISH_WITHOUT_ARTIFACT: &str = "You are about to finish with `success=true`, but this turn did not create or edit any file and the project has no `.wren` file. \
+That means the task is not built. If you still have steps to carry out, do them now. If you need an answer from the user, call `finish` again with `success=false` and put the question in the summary. \
+Do not report success for work that does not exist.";
+
+const QUESTION_IS_NOT_DONE: &str = "A question is not a finished task. If you need the user to decide something, call `finish` with `success=false` and put the question in the summary. \
+If you can pick a sensible default, do that, build the app, and mention the assumption in the final summary.";
+
+/// Shape of a call with digits erased, so `pad.count == 7993` and
+/// `pad.count == 7992` count as the same probe. This is what lets the loop
+/// guards see a spiral where every argument is numerically different.
+fn normalized_call_signature(name: &str, arguments: &str) -> String {
+    let mut out = String::with_capacity(name.len() + arguments.len() + 1);
+    out.push_str(name);
+    out.push('\u{1}');
+    let mut in_digits = false;
+    for ch in arguments.chars() {
+        if ch.is_ascii_digit() {
+            // Collapse the whole run: 7993 and 10000 are the same probe, and so
+            // are `probe1.txt` and `probe10.txt`.
+            if !in_digits {
+                out.push('#');
+                in_digits = true;
+            }
+        } else {
+            in_digits = false;
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Tools worth counting for the call-shape guard. These are the ones that
+/// write code or probe the language; repeating one of them with only a changed
+/// constant is not progress. File reads and tests are excluded: they are
+/// cheap, finite, and legitimately repeat after the code changes.
+fn counts_toward_shape_limit(name: &str) -> bool {
+    matches!(
+        name,
+        "bialet_run" | "write_file" | "edit_file" | "delete_file"
+    )
+}
+
+/// True when the tool call changes the project tree. A failed write does not
+/// count: the point is progress, not intent.
+fn is_mutating_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit_file" | "delete_file" | "create_dir"
+    )
+}
+
+/// Does the workspace already contain a Wren application? Used to avoid
+/// nagging a legitimate "explain this project" turn.
+fn workspace_has_wren(root: &Path) -> bool {
+    fn walk(dir: &Path, depth: usize) -> bool {
+        if depth > 3 {
+            return false;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if path.is_dir() {
+                if name.starts_with('.') || name == "node_modules" || name == "target" {
+                    continue;
+                }
+                if walk(&path, depth + 1) {
+                    return true;
+                }
+            } else if name.ends_with(".wren") {
+                return true;
+            }
+        }
+        false
+    }
+    walk(root, 0)
+}
+
+fn invalid_arguments_message(tool: &str, bytes: usize) -> String {
+    format!(
+        "The arguments for `{tool}` were not valid JSON ({bytes} bytes received). \
+         Nothing was executed. This usually means the completion was cut off because the payload was too long. \
+         Retry with a smaller payload: split the file into `write_file` + `edit_file`, or run a shorter snippet. \
+         Do not resend the same oversized call."
+    )
+}
+
 /// Normalize a tool failure into a signature that ignores volatile details
-/// (timestamps, line numbers, row ids) so a stuck loop is visible even when the
-/// model varies the arguments slightly between otherwise identical attempts.
+/// (timestamps, line numbers, row ids, random ids) so a stuck loop is visible
+/// even when the model varies the arguments slightly between attempts.
 fn failure_signature(output: &str) -> String {
     let mut sig = String::new();
-    let mut last_space = true;
-    for ch in output.chars().flat_map(|c| c.to_lowercase()) {
-        // Letters only: digits are dropped so timestamps, line numbers and row
-        // ids do not masquerade as different failures.
-        if ch.is_alphabetic() {
-            sig.push(ch);
-            last_space = false;
-        } else if !last_space {
-            sig.push(' ');
-            last_space = true;
+    let interesting = [
+        "error",
+        "✗",
+        "expected",
+        "failed",
+        "does not implement",
+        "panic",
+        "cannot",
+        "not found",
+        "invalid",
+    ];
+    for line in output.lines() {
+        let low = line.to_lowercase();
+        if !interesting.iter().any(|m| low.contains(m)) {
+            continue;
+        }
+        for token in low.split_whitespace() {
+            // Drop long random identifiers (session ids, hashes, uuids): they
+            // differ on every run and would hide the repeated failure.
+            let alnum = token.chars().filter(|c| c.is_ascii_alphanumeric()).count();
+            let has_digit = token.chars().any(|c| c.is_ascii_digit());
+            if alnum >= 12 && has_digit {
+                continue;
+            }
+            let cleaned: String = token.chars().filter(|c| c.is_alphabetic()).collect();
+            if !cleaned.is_empty() {
+                sig.push_str(&cleaned);
+                sig.push(' ');
+            }
         }
         if sig.len() >= 200 {
             break;
+        }
+    }
+    if sig.trim().is_empty() {
+        // Nothing matched the markers: fall back to the old letters-only pass
+        // so every failure still has a stable signature.
+        let mut last_space = true;
+        for ch in output.chars().flat_map(|c| c.to_lowercase()) {
+            if ch.is_alphabetic() {
+                sig.push(ch);
+                last_space = false;
+            } else if !last_space {
+                sig.push(' ');
+                last_space = true;
+            }
+            if sig.len() >= 200 {
+                break;
+            }
         }
     }
     sig.trim().to_string()
@@ -404,12 +570,24 @@ impl Agent {
         let mut verify_nudged = false;
         let mut syntax_nudged = false;
         // Repeated-call detection: the last call signature and how many times in
-        // a row it has been issued.
+        // a row it has been issued. Digits are normalized away so a loop that
+        // only changes a number still looks like the same call.
         let mut last_call: Option<String> = None;
         let mut repeat_count: u32 = 0;
-        // Stuck-loop detection: the last failure signature and its run length.
-        let mut last_failure: Option<String> = None;
-        let mut failure_count: u32 = 0;
+        // Per-turn call-shape counts and failure counts. These are deliberately
+        // not consecutive: alternating edit/test or probe/probe cycles must trip
+        // them too.
+        let mut call_shapes: HashMap<String, u32> = HashMap::new();
+        let mut nudged_shapes: HashSet<String> = HashSet::new();
+        let mut failure_counts: HashMap<String, u32> = HashMap::new();
+        let mut nudged_failures: HashSet<String> = HashSet::new();
+        // Progress tracking: a turn that never writes a file cannot finish the
+        // task, however many docs it reads.
+        let mut calls_without_mutation: u32 = 0;
+        let mut progress_nudged = false;
+        let mut mutated_this_turn = false;
+        let mut finish_nudged = false;
+        let mut invalid_args_nudged = false;
 
         for _ in 0..self.config.max_iterations {
             let request = ChatRequest {
@@ -484,22 +662,39 @@ impl Agent {
                 return Ok(TurnOutcome::Stopped(response.content));
             }
 
-            let mut stuck_nudge_pending = false;
+            let mut nudge_after_batch: Option<&'static str> = None;
             for call in calls {
-                // Break tool-call loops: the same call with identical arguments
-                // three times in a row cannot produce a new result.
-                let signature = format!("{}\u{1}{}", call.name, call.arguments);
-                if last_call.as_deref() == Some(signature.as_str()) {
+                // Break tool-call loops: the exact same call three times in a
+                // row cannot produce a new result. The *shape* guard below is
+                // the one that normalizes numbers, so a probe that only changes
+                // a constant is still caught.
+                let call_signature = format!("{}\u{1}{}", call.name, call.arguments);
+                if last_call.as_deref() == Some(call_signature.as_str()) {
                     repeat_count += 1;
                 } else {
                     repeat_count = 1;
-                    last_call = Some(signature);
+                    last_call = Some(call_signature);
                 }
+                let shape_signature = normalized_call_signature(&call.name, &call.arguments);
+                let shape_count = if counts_toward_shape_limit(&call.name) {
+                    let count = call_shapes.entry(shape_signature.clone()).or_insert(0);
+                    *count += 1;
+                    *count
+                } else {
+                    0
+                };
 
-                let args_value: serde_json::Value =
-                    serde_json::from_str(&call.arguments).unwrap_or_else(|_| serde_json::json!({}));
-                let args_encoded = encode_json_args(&args_value);
-                let changed_wren = mutates_wren(&call.name, &args_value);
+                // A truncated completion produces invalid JSON. Do not turn that
+                // into a misleading "missing required argument": nothing ran.
+                let parsed = serde_json::from_str::<serde_json::Value>(&call.arguments).ok();
+                let arguments_ok = parsed.is_some();
+                let args_value = parsed.unwrap_or_else(|| serde_json::json!({}));
+                let args_encoded = if arguments_ok {
+                    encode_json_args(&args_value)
+                } else {
+                    format!("_invalid_json=true&raw_len={}", call.arguments.len())
+                };
+                let changed_wren = arguments_ok && mutates_wren(&call.name, &args_value);
 
                 emit!(AgentEvent::ToolCall {
                     name: call.name.clone(),
@@ -509,17 +704,39 @@ impl Agent {
                     .append(&Event::tool_call(&call.name, &args_encoded))
                     .await?;
 
-                let result = if repeat_count >= 3 {
+                let result = if !arguments_ok {
+                    if !invalid_args_nudged {
+                        invalid_args_nudged = true;
+                        nudge_after_batch.get_or_insert(INVALID_ARGS_NUDGE);
+                    }
+                    ToolResult::err(invalid_arguments_message(&call.name, call.arguments.len()))
+                } else if call.arguments.len() > MAX_TOOL_ARGS_BYTES {
+                    ToolResult::err(format!(
+                        "The arguments for `{}` are {} bytes, above the {MAX_TOOL_ARGS_BYTES}-byte limit. \
+                         Nothing was executed. Split the work into smaller calls (`write_file` for the first part, then `edit_file`).",
+                        call.name,
+                        call.arguments.len()
+                    ))
+                } else if repeat_count >= 3 {
                     emit!(AgentEvent::Notice(format!(
-                        "skipping `{}`: identical call repeated {repeat_count} times",
+                        "skipping `{}`: same call repeated {repeat_count} times",
                         call.name
                     )));
                     ToolResult::err(format!(
-                        "skipped by the harness: `{}` was already called {repeat_count} times in a row with identical arguments, so the result cannot change. Do not repeat it — change your approach, or explain to the user what is blocking you.",
+                        "skipped by the harness: `{}` was already called {repeat_count} times in a row with the same arguments, so the result cannot change. Do not repeat it — change your approach, or explain to the user what is blocking you.",
                         call.name
                     ))
                 } else {
                     self.tools.call(&call.name, &self.ctx, args_value).await
+                };
+                let mut result = result;
+                if result.output.len() > MAX_TOOL_OUTPUT_BYTES {
+                    result.output = cap_bytes(&result.output, MAX_TOOL_OUTPUT_BYTES);
+                }
+                let failure_hint = if result.status == ToolStatus::Ok {
+                    String::new()
+                } else {
+                    first_line(&result.output, 160)
                 };
                 let terminate = result.terminate.clone();
                 let session_status = if result.status == ToolStatus::Ok {
@@ -556,6 +773,17 @@ impl Agent {
                     ))
                 };
 
+                // Progress: only a successful file mutation counts as work.
+                if result.status == ToolStatus::Ok && is_mutating_tool(&call.name) {
+                    mutated_this_turn = true;
+                    calls_without_mutation = 0;
+                } else {
+                    calls_without_mutation += 1;
+                }
+                if arguments_ok {
+                    invalid_args_nudged = false;
+                }
+
                 self.messages.push(ChatMessage::tool_result(
                     call.id.clone(),
                     call.name.clone(),
@@ -575,27 +803,63 @@ impl Agent {
                 }
 
                 // Stuck-loop detection: the same tool failing the same way over
-                // and over cannot make progress. Flag it so the model is nudged
-                // to change approach after this batch of calls.
+                // and over cannot make progress. The count is per turn and does
+                // not reset on unrelated successes, so edit/test cycles trip it.
                 if let Some(sig) = fail_sig {
-                    if last_failure.as_deref() == Some(sig.as_str()) {
-                        failure_count += 1;
-                    } else {
-                        failure_count = 1;
-                        last_failure = Some(sig);
+                    let count = {
+                        let c = failure_counts.entry(sig.clone()).or_insert(0);
+                        *c += 1;
+                        *c
+                    };
+                    if count >= STUCK_STOP_THRESHOLD {
+                        return Err(anyhow::anyhow!(
+                            "stopped: `{}` failed the same way {count} times in a row (last error: {}). \
+                             Repeating it cannot help; this turn is being aborted instead of burning the remaining iterations.",
+                            call.name,
+                            failure_hint
+                        ));
                     }
-                    if failure_count >= STUCK_THRESHOLD {
-                        failure_count = 0;
-                        last_failure = None;
-                        stuck_nudge_pending = true;
+                    if count >= STUCK_THRESHOLD && nudged_failures.insert(sig) {
+                        nudge_after_batch.get_or_insert(STUCK_NUDGE);
                         emit!(AgentEvent::Notice(format!(
-                            "`{}` failed the same way {STUCK_THRESHOLD} times; asking the model to change approach",
+                            "`{}` failed the same way {count} times; asking the model to change approach",
                             call.name
                         )));
                     }
-                } else {
-                    failure_count = 0;
-                    last_failure = None;
+                }
+
+                // A call shape repeated with only cosmetic changes is a probe,
+                // not work. Nudge once, then abort if it continues.
+                if shape_count >= CALL_SHAPE_STOP_THRESHOLD {
+                    return Err(anyhow::anyhow!(
+                        "stopped: `{}` was called {shape_count} times with the same arguments (ignoring numbers). \
+                         This is a probe loop, not progress; the turn is being aborted so it does not burn the iteration budget.",
+                        call.name
+                    ));
+                }
+                if shape_count >= CALL_SHAPE_NUDGE_THRESHOLD
+                    && nudged_shapes.insert(shape_signature)
+                {
+                    nudge_after_batch.get_or_insert(CALL_SHAPE_NUDGE);
+                    emit!(AgentEvent::Notice(format!(
+                        "`{}` repeated the same call shape {shape_count} times; asking the model to change approach",
+                        call.name
+                    )));
+                }
+
+                if calls_without_mutation >= PROGRESS_STOP_THRESHOLD {
+                    return Err(anyhow::anyhow!(
+                        "stopped: {calls_without_mutation} tool calls in a row without creating or editing a file. \
+                         The model is stuck exploring instead of building; the turn is being aborted."
+                    ));
+                }
+                if calls_without_mutation >= PROGRESS_NUDGE_THRESHOLD && !progress_nudged {
+                    progress_nudged = true;
+                    nudge_after_batch.get_or_insert(PROGRESS_NUDGE);
+                    emit!(AgentEvent::Notice(
+                        "many read-only calls without a file write; asking the model to build"
+                            .into()
+                    ));
                 }
 
                 // The `finish` tool ends the turn with an explicit outcome, but
@@ -621,6 +885,26 @@ impl Agent {
                         self.messages.push(ChatMessage::user(nudge));
                         break;
                     }
+                    // A "success" that created nothing is not a success. Nudge
+                    // once; the model may still insist (a legitimate Q&A turn).
+                    if t.success && !finish_nudged {
+                        if !mutated_this_turn && !workspace_has_wren(&self.ctx.root) {
+                            finish_nudged = true;
+                            nudge_after_batch.get_or_insert(FINISH_WITHOUT_ARTIFACT);
+                            emit!(AgentEvent::Notice(
+                                "finish(success) rejected: no file was created this turn".into()
+                            ));
+                            break;
+                        }
+                        if looks_like_question(&t.summary) {
+                            finish_nudged = true;
+                            nudge_after_batch.get_or_insert(QUESTION_IS_NOT_DONE);
+                            emit!(AgentEvent::Notice(
+                                "finish(success) rejected: the summary is a question".into()
+                            ));
+                            break;
+                        }
+                    }
                     return Ok(TurnOutcome::Finished {
                         summary: t.summary,
                         success: t.success,
@@ -628,8 +912,8 @@ impl Agent {
                 }
             }
 
-            if stuck_nudge_pending {
-                self.messages.push(ChatMessage::user(STUCK_NUDGE));
+            if let Some(nudge) = nudge_after_batch {
+                self.messages.push(ChatMessage::user(nudge));
                 continue;
             }
         }
@@ -832,5 +1116,42 @@ mod tests {
         assert_eq!(pending_verification(true, true, true, true), None);
         // No Wren change: nothing to verify.
         assert_eq!(pending_verification(false, false, false, false), None);
+    }
+
+    #[test]
+    fn call_shape_ignores_numbers_but_not_structure() {
+        let a = normalized_call_signature("bialet_run", r#"{"code":"pad.count == 7993"}"#);
+        let b = normalized_call_signature("bialet_run", r#"{"code":"pad.count == 7992"}"#);
+        assert_eq!(a, b, "a changed constant is the same probe");
+
+        let c = normalized_call_signature("bialet_run", r#"{"code":"System.print(Date.new())"}"#);
+        assert_ne!(a, c, "a different snippet is a different call");
+    }
+
+    #[test]
+    fn failure_signature_ignores_random_session_ids() {
+        let a = "✗ lista.wren (40ms)\nExpected body to contain \"x\"\nrows=[{key: who, id: oa9jvaiLKlHSJi9YgAGzqa5uE70I3lDwpnK8cqBQ}]";
+        let b = "✗ lista.wren (37ms)\nExpected body to contain \"x\"\nrows=[{key: who, id: U9668fRw8Xm4DkciG6ExGyyvmuEFwB2BTKDwTNRT}]";
+        assert_eq!(
+            failure_signature(a),
+            failure_signature(b),
+            "random ids must not hide a repeated failure"
+        );
+        assert!(failure_signature(a).contains("expected"));
+    }
+
+    #[test]
+    fn workspace_detection_ignores_vendor_dirs() {
+        let dir = std::env::temp_dir().join(format!("masse-has-wren-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("node_modules")).unwrap();
+        std::fs::write(dir.join("node_modules/x.wren"), "// vendor").unwrap();
+        assert!(!workspace_has_wren(&dir));
+
+        std::fs::create_dir_all(dir.join("_app")).unwrap();
+        std::fs::write(dir.join("_app/domain.wren"), "class A {}").unwrap();
+        assert!(workspace_has_wren(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
