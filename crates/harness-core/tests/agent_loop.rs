@@ -983,3 +983,74 @@ impl Provider for ProbeLoopProvider {
         })
     }
 }
+
+/// Reports a fixed usage block so the accounting, pricing and context paths can
+/// be asserted end to end.
+struct UsageProvider;
+
+#[async_trait]
+impl Provider for UsageProvider {
+    fn name(&self) -> &str {
+        "usage"
+    }
+    async fn complete(&self, _request: ChatRequest) -> ProviderResult<ChatResponse> {
+        Ok(ChatResponse {
+            content: "listo".into(),
+            usage: harness_core::TokenUsage {
+                prompt_tokens: 64_000,
+                completion_tokens: 1_000_000,
+                total_tokens: 1_064_000,
+            },
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn usage_event_reports_tokens_cost_and_context() {
+    let root = std::env::temp_dir().join(format!("masse-usage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let session = Arc::new(SessionStore::new(root.join("session.csv")));
+    let config = AgentConfig {
+        model: "deepseek-chat".into(),
+        system_prompt: "s".into(),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(
+        Arc::new(UsageProvider),
+        Arc::new(builtin_registry()),
+        ToolContext::new(&root),
+        session,
+        config,
+    )
+    .await
+    .unwrap();
+
+    let (tx, mut rx) = broadcast::channel(64);
+    agent.send("hola", Some(&tx)).await.unwrap();
+    drop(tx);
+
+    let mut usage = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::Usage(report) = event {
+            usage = Some(report);
+        }
+    }
+    let report = usage.expect("a Usage event must be emitted");
+    assert_eq!(report.turn.normalized_total(), 1_064_000);
+    assert_eq!(report.total.normalized_total(), 1_064_000);
+    // deepseek-chat: 0.064M in at $0.27 + 1.0M out at $1.10.
+    let expected = 0.064 * 0.27 + 1.0 * 1.10;
+    assert!(
+        (report.turn_cost_usd.unwrap() - expected).abs() < 1e-9,
+        "cost was {:?}",
+        report.turn_cost_usd
+    );
+    assert_eq!(report.context_tokens, 64_000);
+    assert_eq!(report.context_window, Some(128_000));
+    assert_eq!(report.context_percent(), Some(50.0));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
