@@ -98,8 +98,10 @@ discovers `skills/*/SKILL.md`, locates the Bialet docs, and looks for a live
 Bialet framework prompt (following Sphinx `literalinclude` wrappers). The
 system prompt is then assembled in `prompt.rs` from the base role, the tool
 reference, the Bialet guide (live copy if found, otherwise the copy embedded in
-the binary at `assets/bialet_prompt.md`), `AGENTS.md`, the skills index and a
-docs pointer.
+the binary at `assets/bialet_prompt.md`), the Wren language guide from wren.io
+(`assets/wren_prompt.md`), `AGENTS.md`, the skills index and a docs pointer.
+The Wren standard library is bundled as `wren-*.md` pages that `bialet_docs`
+serves on demand, so the prompt only carries the language guide.
 
 ## Tools
 

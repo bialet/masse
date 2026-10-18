@@ -107,7 +107,7 @@ Bialet tools map to the framework CLI:
 | `bialet_server_start` | `bialet -p <port> <path>` (background, logs to `.masse/log.txt`; falls back to a free port if the requested one is busy) |
 | `bialet_server_stop` | kills the tracked background process |
 | `bialet_log_read` | native read of `.masse/log.txt` (or a given file) |
-| `bialet_docs` | search/read the local Bialet/Wren docs, plus bundled `sqlite.md`, `html.md`, `css.md`, `javascript.md` (local files win on name collisions) |
+| `bialet_docs` | search/read the local Bialet/Wren docs, plus bundled `sqlite.md`, `html.md`, `css.md`, `javascript.md` and the Wren core classes (`wren-string.md`, `wren-list.md`, …) — local files win on name collisions |
 
 Background processes started by `bialet_server_start` live **in the runtime
 memory** of masse, never on disk. Restarting masse forgets them; `--tui` and
@@ -322,19 +322,23 @@ cargo test --workspace
 
 ## What goes into the system prompt
 
-masse is **Bialet-first**: the Bialet framework guide is part of the system
-prompt by default, so it writes idiomatic `.wren` from the first response.
-Composition (`harness-core/src/prompt.rs`):
+masse is **Bialet-first**: the Bialet framework guide and the Wren language
+guide are part of the system prompt by default, so it writes idiomatic `.wren`
+from the first response. Composition (`harness-core/src/prompt.rs`):
 
 1. base instructions: masse's role, the atomic-tool philosophy, and Bialet
    essentials;
 2. the tool reference;
 3. the Bialet framework guide — a live copy if one is found, otherwise the copy
    bundled in the binary (`assets/bialet_prompt.md`, embedded at build time);
-4. the repository `AGENTS.md` (chat messages take priority over it);
-5. the list of discovered skills;
-6. a pointer to the local docs;
-7. the contents of `--prompt-file`, when given.
+4. the Wren language guide from [wren.io](https://wren.io) (bundled as
+   `assets/wren_prompt.md`); where the two guides disagree, the Bialet guide
+   wins;
+5. the repository `AGENTS.md` (chat messages take priority over it);
+6. the list of discovered skills;
+7. a pointer to the local docs, including the bundled Wren standard-library
+   pages (`wren-string.md`, `wren-list.md`, …) for `bialet_docs`;
+8. the contents of `--prompt-file`, when given.
 
 The live guide is searched in this order:
 

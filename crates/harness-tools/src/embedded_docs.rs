@@ -46,6 +46,58 @@ pub const EMBEDDED_DOCS: &[EmbeddedDoc] = &[
         name: "tests.md",
         content: include_str!("../../../assets/docs/tests.md"),
     },
+    EmbeddedDoc {
+        name: "wren-bool.md",
+        content: include_str!("../../../assets/docs/wren-bool.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-class.md",
+        content: include_str!("../../../assets/docs/wren-class.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-fiber.md",
+        content: include_str!("../../../assets/docs/wren-fiber.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-fn.md",
+        content: include_str!("../../../assets/docs/wren-fn.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-list.md",
+        content: include_str!("../../../assets/docs/wren-list.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-map.md",
+        content: include_str!("../../../assets/docs/wren-map.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-null.md",
+        content: include_str!("../../../assets/docs/wren-null.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-num.md",
+        content: include_str!("../../../assets/docs/wren-num.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-object.md",
+        content: include_str!("../../../assets/docs/wren-object.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-range.md",
+        content: include_str!("../../../assets/docs/wren-range.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-sequence.md",
+        content: include_str!("../../../assets/docs/wren-sequence.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-string.md",
+        content: include_str!("../../../assets/docs/wren-string.md"),
+    },
+    EmbeddedDoc {
+        name: "wren-system.md",
+        content: include_str!("../../../assets/docs/wren-system.md"),
+    },
 ];
 
 /// Look up a bundled page by its file name.
@@ -59,7 +111,7 @@ mod tests {
 
     #[test]
     fn every_doc_is_present_and_non_empty() {
-        assert_eq!(EMBEDDED_DOCS.len(), 8);
+        assert_eq!(EMBEDDED_DOCS.len(), 21);
         for doc in EMBEDDED_DOCS {
             assert!(doc.content.contains('#'), "{} has no heading", doc.name);
         }
@@ -70,6 +122,8 @@ mod tests {
         assert!(get("sqlite.md").is_some());
         assert!(get("database.md").is_some());
         assert!(get("tests.md").is_some());
+        assert!(get("wren-string.md").is_some());
+        assert!(get("wren-fiber.md").is_some());
         assert!(get("nope.md").is_none());
     }
 

@@ -11,6 +11,11 @@ use crate::context::{FrameworkPrompt, ProjectContext};
 /// The Bialet framework guide shipped inside the binary.
 pub const EMBEDDED_BIALET_PROMPT: &str = include_str!("../../../assets/bialet_prompt.md");
 
+/// The Wren language guide (from wren.io) shipped inside the binary. Bialet
+/// embeds Wren, so the language itself belongs in the prompt next to the
+/// framework guide.
+pub const EMBEDDED_WREN_PROMPT: &str = include_str!("../../../assets/wren_prompt.md");
+
 const BASE_PROMPT: &str = r#"You are masse, an AI coding agent specialised in building and maintaining web
 applications with **Bialet**: the single-binary web framework that embeds the
 Wren language and SQLite. You are not a general-purpose shell assistant.
@@ -177,6 +182,12 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
         }
     }
 
+    // The Wren language itself. The framework guide above describes how
+    // Bialet wires Wren to HTTP and SQLite; this one covers the language.
+    prompt.push_str("\n\n");
+    prompt.push_str(EMBEDDED_WREN_PROMPT.trim());
+    prompt.push('\n');
+
     if let Some(agents) = &ctx.agents_md {
         prompt.push_str(
             "\n\n# Repository instructions (AGENTS.md)\n\n\
@@ -205,7 +216,11 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
          (`topic` to search, `file` to read a page, `list` to enumerate). Bundled \
          references are always available: `sqlite.md` (SQL), `database.md` (the \
          Query API), `template.md` (inline HTML), `html.md`, `html-first.md`, \
-         `css.md`, `javascript.md`, and `tests.md` (the `Test` API).\n",
+         `css.md`, `javascript.md`, `tests.md` (the `Test` API), and the Wren \
+         core classes `wren-bool.md`, `wren-class.md`, `wren-fiber.md`, \
+         `wren-fn.md`, `wren-list.md`, `wren-map.md`, `wren-null.md`, \
+         `wren-num.md`, `wren-object.md`, `wren-range.md`, `wren-sequence.md`, \
+         `wren-string.md` and `wren-system.md`.\n",
     );
     if let Some(docs) = &ctx.docs_dir {
         prompt.push_str(&format!(
@@ -307,6 +322,26 @@ mod tests {
         );
         assert!(prompt.contains("database.md"));
         assert!(prompt.contains("tests.md"));
+        assert!(prompt.contains("wren-string.md"));
+    }
+
+    #[test]
+    fn prompt_includes_the_wren_language_guide() {
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(prompt.contains("Wren language guide (bundled copy)"));
+        assert!(prompt.contains("Fn.new"));
+        assert!(prompt.contains("block arguments"));
+        // The language guide follows the framework guide, so the framework's
+        // dialect rules are not buried under the standard Wren docs.
+        let bialet = prompt.find("Bialet framework guide").unwrap();
+        let wren = prompt.find("Wren language guide").unwrap();
+        assert!(bialet < wren);
     }
 
     #[test]
