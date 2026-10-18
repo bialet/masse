@@ -189,12 +189,16 @@ Stable `Util` helpers:
 ```wren
 Config.get("title")            // String or null
 Config.set("title", "Mi app")
-Config.bool("beta_features")   // true/false
+Config.bool("beta_features")   // true/false (true when the key is absent!)
 Config.num("page_size")        // Num
 Config.enable("beta_features") // same as Config.set("beta_features", "1")
 Config.disable("maintenance")  // same as Config.set("maintenance", "0")
 Config.json("theme")           // parsed JSON value
 ```
+
+`Config.bool(key)` is implemented as `get(key) != "0"`, so it returns **true
+when the key is absent**. For an opt-in flag (a test mode, a feature gate) use
+`Config.get(key) == "1"` and set it explicitly.
 
 ## Queries with more than three parameters
 

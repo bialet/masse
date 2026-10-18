@@ -53,7 +53,8 @@ for (row in rows) { ... }
 ```
 
 `for (x in null)` is a hard crash, not an exception. Guard every Query result
-and every helper that can return null.
+and every helper that can return null. The same applies to a Map row:
+`row.values` / `row.keys` on a null row crash; check `if (!row)` first.
 
 ## 5. A literal `%` in a Wren string is `\x25`
 
@@ -206,7 +207,8 @@ for (i in 0...xs.count) out.add(xs[xs.count - 1 - i])
 ```wren
 var session = Session.new()
 if (Request.isPost) {
-  if (!session.csrfOk && !Config.bool("test_mode")) return Response.status(403)
+  // Config.bool("test_mode") is TRUE when the key is absent, so use get()=="1".
+  if (!session.csrfOk && Config.get("test_mode") != "1") return Response.status(403)
   ...
 }
 {{ session.csrf }}
@@ -223,7 +225,12 @@ once in `_tests/_init.wren`:
 Config.set("test_mode", "1")
 ```
 
-Never disable CSRF outside the test flag.
+`Config.bool(key)` returns **true when the key is absent** (`get(key) != "0"`),
+so it is unsafe for an opt-in test flag: it would disable CSRF by default. Use
+`Config.get(key) == "1"`. Never disable CSRF outside the test flag.
+
+Tests also share one `BIALET_CONFIG`: a test that sets a config value leaks it
+into every other test file. Reset the key or use a unique one.
 
 ## 20. Zero-argument methods still need `()`
 
@@ -253,7 +260,61 @@ m.containsKey("a")  // true
 A test that inserts the same unique value as `_tests/_init.wren` fails before it
 exercises anything. Use `INSERT OR IGNORE`, or seed distinct values per file.
 
-## 23. Do not call `Date.new()` inside a `Db.migrate` callback
+## 23. HTML templates use `{{ }}`, not `%(...)`
+
+```wren
+// correct in a route/template HTML block
+<p>Total: $ {{ Money.fmt(total) }}</p>
+
+// wrong: %(...) is Wren string interpolation, and HTML renders it literally
+<p>Total: $ %(Money.fmt(total))</p>
+```
+
+`%(...)` only works inside a Wren string literal. In an HTML block Bialet uses
+`{{ expression }}`.
+
+## 24. Name the columns in every INSERT
+
+```wren
+// breaks as soon as the table has an id/createdAt column:
+`INSERT INTO expenses VALUES (?, ?, ?)`
+// correct:
+`INSERT INTO expenses (concept, cents, spentOn) VALUES (?, ?, ?)`
+```
+
+`expenses has 7 columns but 6 values supplied` is this mistake. Naming the
+columns also keeps the insert valid when a later migration adds a column.
+
+## 25. Strings do not implement `<` or `>`
+
+```wren
+"2026-01-01" < "2026-02-01"
+// Runtime Error: String does not implement '<(_)'.
+```
+
+Strings only support `==` / `!=`. Compare parsed values instead:
+
+```wren
+Date.new("2026-01-01") < Date.new("2026-02-01")
+Num.fromString(a) < Num.fromString(b)
+```
+
+This is the classic "the list works until the first row exists" 500.
+
+## 26. A failed migration can still be marked as applied
+
+If the SQL in `Db.migrate` fails (`incomplete input`, a missing column, ...),
+Bialet can still record the version in `BIALET_MIGRATIONS`. Fixing the `.wren`
+then does nothing because the migration is considered done. Either bump the
+version string (`"Create coverage table v2"`) or delete the row:
+
+```sql
+DELETE FROM BIALET_MIGRATIONS WHERE version = 'Create coverage table';
+```
+
+Check this before assuming a schema change took effect.
+
+## 26. Do not call `Date.new()` inside a `Db.migrate` callback
 
 `Db.migrate` callbacks run before `Date.init`, so any date construction or date
 arithmetic there crashes the whole process with SIGSEGV (exit 139) and the app

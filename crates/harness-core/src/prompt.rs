@@ -60,13 +60,17 @@ How to work:
   - A method you define with `name()` must be called with `()` (`Klass.total()`);
     only getters (`count`, `toString`) omit the parentheses. `Map` uses
     `m["key"]`, not `m.get("key")`.
+  - Strings only support `==` / `!=`: `"2026-01-01" < "2026-02-01"` crashes.
+    Parse to `Date` or `Num` before `<` / `>`.
   - `toString`, `count`, `keys` and `values` are getters: write `val.toString`.
     `trim` is a method: the canonical setter is `val.toString.trim()`.
     `val.toString()` and `val.toString.trim` both fail at runtime.
   - Never compare a Date to null with `date == null` (it calls `Date.==` and
     crashes on `other.unix`). Use `if (!date)` or `if (null == date)`.
   - A literal `%` in a Wren string is `\x25`; `"100%"` does not compile. In an
-    HTML template write `%` directly (or `&#37;`), never `\x25`.
+    HTML template write `%` directly (or `&#37;`), never `\x25`, and use
+    `{{ expression }}` for values: `%(...)` is only for Wren strings and
+    renders literally in HTML.
   - Query methods take at most three positional arguments; pass one List for
     four or more (`fetch([a,b,c,d])`).
   - `BIALET_CONFIG` has columns `(key, val)`; use `Config.set`, never a raw
@@ -99,9 +103,10 @@ How to work:
   temporary database per run, so do not assume isolation; seed shared rows in
   `_tests/_init.wren`. Never `System.print` a whole table, and delete any
   `debug*.wren` file you created before finishing. If the app checks CSRF
-  (`session.csrfOk`), gate it with `Config.bool("test_mode")` and set that in
-  `_init.wren`: `Test.post` has no cookie jar and cannot reuse the token from a
-  previous GET.
+  (`session.csrfOk`), gate it with `Config.get("test_mode") == "1"` and set that
+  in `_init.wren`: `Test.post` has no cookie jar and cannot reuse the token from
+  a previous GET. Do not use `Config.bool("test_mode")`: it is true when the key
+  is absent, which disables CSRF by default.
 - Test by hand too when it helps: the `curl` tool posts to the local Bialet
   server started by `bialet_server_start` (it accepts the same `data` body the
   browser would). It is confined to that server's loopback port — it cannot

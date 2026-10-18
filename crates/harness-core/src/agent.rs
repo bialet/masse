@@ -143,6 +143,9 @@ const PROGRESS_NUDGE: &str = "You have made many tool calls without creating or 
 Stop exploring and build: write `_app/migration.wren`, `_app/domain.wren`, `_app/template.wren` and the route files now. \
 If an API is unclear, consult `bialet_docs` once and write the simplest version; the validator and the tests will tell you what is wrong.";
 
+const BIALET_RUN_NUDGE: &str = "You are using `bialet_run` as a framework REPL. It has no request, session or BIALET_* tables, so it cannot build or verify the app. \
+Stop probing: write `_app/migration.wren`, `_app/domain.wren`, `_app/template.wren` and the route files, then use `bialet_test` and the server.";
+
 const PROGRESS_FINISH_NUDGE: &str = "You have already written files, so stop probing and close the turn. \
 Run `bialet_test` once, delete any `debug*.wren` / `*probe*.wren` files you created, and call `finish` with a short summary. \
 If something is still missing, say exactly what and finish with `success=false`. Do not keep running one-off snippets.";
@@ -288,6 +291,25 @@ fn invalid_arguments_message(tool: &str, bytes: usize) -> String {
          Retry with a smaller payload: split the file into `write_file` + `edit_file`, or run a shorter snippet. \
          Do not resend the same oversized call."
     )
+}
+
+/// Pick the most useful line of a failed tool output: the assertion or the
+/// first compiler/runtime error, not the `exit_code` header. Used in the
+/// change-of-approach nudge so the model can fix the exact code path.
+fn failure_hint(output: &str) -> String {
+    for line in output.lines() {
+        let text = line.trim();
+        if text.contains("Expected")
+            || text.contains('✗')
+            || text.starts_with("Query Error")
+            || text.starts_with("Runtime Error")
+            || text.starts_with("Compilation Error")
+            || text.starts_with("Error:")
+        {
+            return text.chars().take(240).collect();
+        }
+    }
+    first_line(output, 160)
 }
 
 /// Normalize a tool failure into a signature that ignores volatile details
@@ -647,6 +669,11 @@ impl Agent {
         let mut finish_nudged = false;
         let mut cleanup_nudged = false;
         let mut invalid_args_nudged = false;
+        // A growing `bialet_run` snippet (6 lines, 7, 8...) evades the
+        // call-shape guard because the arguments really are different. The
+        // count of consecutive runs catches that spiral.
+        let mut consecutive_bialet_runs: u32 = 0;
+        let mut bialet_run_nudged = false;
 
         for _ in 0..self.config.max_iterations {
             let request = ChatRequest {
@@ -738,7 +765,7 @@ impl Agent {
                 return Ok(TurnOutcome::Stopped(response.content));
             }
 
-            let mut nudge_after_batch: Option<&'static str> = None;
+            let mut nudge_after_batch: Option<String> = None;
             for call in calls {
                 // Break tool-call loops: the exact same call three times in a
                 // row cannot produce a new result. The *shape* guard below is
@@ -783,7 +810,7 @@ impl Agent {
                 let result = if !arguments_ok {
                     if !invalid_args_nudged {
                         invalid_args_nudged = true;
-                        nudge_after_batch.get_or_insert(INVALID_ARGS_NUDGE);
+                        nudge_after_batch.get_or_insert_with(|| INVALID_ARGS_NUDGE.to_string());
                     }
                     ToolResult::err(invalid_arguments_message(&call.name, call.arguments.len()))
                 } else if call.arguments.len() > MAX_TOOL_ARGS_BYTES {
@@ -812,8 +839,15 @@ impl Agent {
                 let failure_hint = if result.status == ToolStatus::Ok {
                     String::new()
                 } else {
-                    first_line(&result.output, 160)
+                    failure_hint(&result.output)
                 };
+                if call.name == "bialet_run" {
+                    consecutive_bialet_runs += 1;
+                } else if result.status == ToolStatus::Ok
+                    && (is_mutating_tool(&call.name) || call.name == "bialet_test")
+                {
+                    consecutive_bialet_runs = 0;
+                }
                 let terminate = result.terminate.clone();
                 let session_status = if result.status == ToolStatus::Ok {
                     SessionStatus::Ok
@@ -901,12 +935,40 @@ impl Agent {
                         return Ok(TurnOutcome::Stopped(reason));
                     }
                     if count >= STUCK_THRESHOLD && nudged_failures.insert(sig) {
-                        nudge_after_batch.get_or_insert(STUCK_NUDGE);
+                        nudge_after_batch.get_or_insert_with(|| {
+                            format!(
+                                "{STUCK_NUDGE}\nThe last failure was:\n{failure_hint}\n\
+                                 Change the code path that produces that error; do not rerun the same test until you have changed it."
+                            )
+                        });
                         emit!(AgentEvent::Notice(format!(
                             "`{}` failed the same way {count} times; asking the model to change approach",
                             call.name
                         )));
                     }
+                }
+
+                // A `bialet_run` snippet that grows line by line is a REPL
+                // spiral: every argument is different, so the shape guard
+                // cannot see it. Count consecutive runs instead.
+                if consecutive_bialet_runs >= 24 {
+                    let reason = format!(
+                        "Turn stopped: {consecutive_bialet_runs} consecutive `bialet_run` calls without writing a file. \
+                         `bialet_run` has no request/session and cannot build the app; the turn is being aborted so it does not burn the budget. \
+                         The files written so far are kept."
+                    );
+                    emit!(AgentEvent::AssistantMessage(reason.clone()));
+                    self.session
+                        .append(&Event::assistant_message(&reason))
+                        .await?;
+                    return Ok(TurnOutcome::Stopped(reason));
+                }
+                if consecutive_bialet_runs >= 12 && !bialet_run_nudged {
+                    bialet_run_nudged = true;
+                    nudge_after_batch.get_or_insert_with(|| BIALET_RUN_NUDGE.to_string());
+                    emit!(AgentEvent::Notice(format!(
+                        "{consecutive_bialet_runs} consecutive bialet_run calls; asking the model to write files"
+                    )));
                 }
 
                 // A call shape repeated with only cosmetic changes is a probe,
@@ -927,7 +989,7 @@ impl Agent {
                 if shape_count >= CALL_SHAPE_NUDGE_THRESHOLD
                     && nudged_shapes.insert(shape_signature)
                 {
-                    nudge_after_batch.get_or_insert(CALL_SHAPE_NUDGE);
+                    nudge_after_batch.get_or_insert_with(|| CALL_SHAPE_NUDGE.to_string());
                     emit!(AgentEvent::Notice(format!(
                         "`{}` repeated the same call shape {shape_count} times; asking the model to change approach",
                         call.name
@@ -940,7 +1002,7 @@ impl Agent {
                         // to close the turn instead of throwing the work away.
                         progress_finish_nudged = true;
                         calls_without_mutation = 0;
-                        nudge_after_batch.get_or_insert(PROGRESS_FINISH_NUDGE);
+                        nudge_after_batch.get_or_insert_with(|| PROGRESS_FINISH_NUDGE.to_string());
                         emit!(AgentEvent::Notice(
                             "app files exist but the model keeps probing; asking it to test once and finish"
                                 .into()
@@ -959,7 +1021,7 @@ impl Agent {
                 }
                 if calls_without_mutation >= PROGRESS_NUDGE_THRESHOLD && !progress_nudged {
                     progress_nudged = true;
-                    nudge_after_batch.get_or_insert(PROGRESS_NUDGE);
+                    nudge_after_batch.get_or_insert_with(|| PROGRESS_NUDGE.to_string());
                     emit!(AgentEvent::Notice(
                         "many read-only calls without a file write; asking the model to build"
                             .into()
@@ -994,7 +1056,8 @@ impl Agent {
                     if t.success && !finish_nudged {
                         if !mutated_this_turn && !workspace_has_wren(&self.ctx.root) {
                             finish_nudged = true;
-                            nudge_after_batch.get_or_insert(FINISH_WITHOUT_ARTIFACT);
+                            nudge_after_batch
+                                .get_or_insert_with(|| FINISH_WITHOUT_ARTIFACT.to_string());
                             emit!(AgentEvent::Notice(
                                 "finish(success) rejected: no file was created this turn".into()
                             ));
@@ -1002,7 +1065,8 @@ impl Agent {
                         }
                         if looks_like_question(&t.summary) {
                             finish_nudged = true;
-                            nudge_after_batch.get_or_insert(QUESTION_IS_NOT_DONE);
+                            nudge_after_batch
+                                .get_or_insert_with(|| QUESTION_IS_NOT_DONE.to_string());
                             emit!(AgentEvent::Notice(
                                 "finish(success) rejected: the summary is a question".into()
                             ));
