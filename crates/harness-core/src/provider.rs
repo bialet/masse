@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value as Json};
 
 use crate::message::{ChatMessage, ToolCall};
+use crate::usage::TokenUsage;
 
 /// Provider failure, classified so the agent knows whether a retry can help.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -47,6 +48,9 @@ pub struct ChatResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
+    /// Tokens the provider reported for this completion. Zero when it sends no
+    /// `usage` block (some local servers omit it).
+    pub usage: TokenUsage,
 }
 
 impl ChatResponse {
@@ -226,7 +230,25 @@ impl Provider for OpenAiProvider {
             content,
             tool_calls,
             finish_reason,
+            usage: parse_usage(&parsed),
         })
+    }
+}
+
+/// Read the OpenAI-format `usage` block. Missing fields default to zero; a
+/// provider that sends no `usage` at all yields an empty [`TokenUsage`].
+fn parse_usage(parsed: &Json) -> TokenUsage {
+    let field = |name: &str| {
+        parsed
+            .get("usage")
+            .and_then(|u| u.get(name))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+    };
+    TokenUsage {
+        prompt_tokens: field("prompt_tokens"),
+        completion_tokens: field("completion_tokens"),
+        total_tokens: field("total_tokens"),
     }
 }
 

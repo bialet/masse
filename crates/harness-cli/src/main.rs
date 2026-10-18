@@ -14,8 +14,8 @@ use anyhow::{bail, Context, Result};
 use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use harness_core::{
-    build_system_prompt, Agent, AgentConfig, AgentEvent, AgentHandle, MockProvider, OpenAiProvider,
-    ProjectContext, Provider,
+    build_system_prompt, format_cost, format_tokens, Agent, AgentConfig, AgentEvent, AgentHandle,
+    MockProvider, OpenAiProvider, ProjectContext, Provider,
 };
 use harness_server::AppState;
 use harness_session::SessionStore;
@@ -145,6 +145,16 @@ struct Cli {
     /// Base delay for the retry backoff, in milliseconds.
     #[arg(long, default_value_t = 800)]
     retry_delay_ms: u64,
+
+    /// Price for prompt (input) tokens in USD per million, overriding the
+    /// built-in table. Pair it with --price-output for a fully custom model.
+    #[arg(long, env = "MASSE_PRICE_INPUT")]
+    price_input: Option<f64>,
+
+    /// Price for completion (output) tokens in USD per million, overriding the
+    /// built-in table.
+    #[arg(long, env = "MASSE_PRICE_OUTPUT")]
+    price_output: Option<f64>,
 
     /// Per-request provider timeout, in seconds. Prevents a hung endpoint from
     /// freezing a turn.
@@ -374,6 +384,8 @@ async fn run() -> Result<()> {
         auto_commit: !cli.no_auto_commit,
         auto_push: cli.auto_push && !cli.no_auto_commit,
         system_prompt,
+        price_input: cli.price_input,
+        price_output: cli.price_output,
     };
 
     let session = Arc::new(SessionStore::new(session_path.clone()));
@@ -519,6 +531,18 @@ fn print_config(
         "retries        : {} (base {}ms)",
         cli.max_retries, cli.retry_delay_ms
     );
+    match (cli.price_input, cli.price_output) {
+        (None, None) => println!("pricing        : built-in table (USD / 1M tokens)"),
+        (input, output) => println!(
+            "pricing        : override in={} out={} (USD / 1M tokens)",
+            input
+                .map(|v| format!("${v}"))
+                .unwrap_or_else(|| "table".into()),
+            output
+                .map(|v| format!("${v}"))
+                .unwrap_or_else(|| "table".into()),
+        ),
+    }
     println!(
         "auto-commit    : {}",
         if cli.no_auto_commit {
@@ -627,6 +651,27 @@ fn format_event(event: &AgentEvent) -> String {
             reason,
         } => format!("{ts} RETRY      {attempt}/{max}: {reason}\n"),
         AgentEvent::Notice(message) => format!("{ts} NOTICE     {message}\n"),
+        AgentEvent::Usage(report) => {
+            let cost = match (report.turn_cost_usd, report.total_cost_usd) {
+                (Some(turn), Some(total)) => {
+                    format!(" turn={} total={}", format_cost(turn), format_cost(total))
+                }
+                _ => String::new(),
+            };
+            let ctx = match report.context_percent() {
+                Some(pct) => format!(
+                    " ctx={}/{} ({pct:.0}%)",
+                    format_tokens(report.context_tokens),
+                    format_tokens(report.context_window.unwrap_or(0))
+                ),
+                None => String::new(),
+            };
+            format!(
+                "{ts} USAGE      turn_tokens={} total_tokens={}{cost}{ctx}\n",
+                report.turn.normalized_total(),
+                report.total.normalized_total(),
+            )
+        }
         AgentEvent::Finished { summary, success } => {
             format!("{ts} FINISHED   success={success}: {summary}\n")
         }

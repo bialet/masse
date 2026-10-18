@@ -66,6 +66,7 @@ impl UserModeFilter {
             AgentEvent::ToolCall { .. }
             | AgentEvent::ToolResult { .. }
             | AgentEvent::Retrying { .. }
+            | AgentEvent::Usage(_)
             | AgentEvent::Notice(_) => None,
         }
     }

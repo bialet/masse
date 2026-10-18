@@ -14,7 +14,9 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use harness_core::markdown::{self, Block as MdBlock, Inline};
-use harness_core::{AgentEvent, AgentHandle, Shown, UserModeFilter};
+use harness_core::{
+    format_cost, format_tokens, AgentEvent, AgentHandle, Shown, UsageReport, UserModeFilter,
+};
 use harness_session::Event as SessionEvent;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -54,6 +56,8 @@ struct App {
     history_cursor: Option<usize>,
     debug: bool,
     filter: UserModeFilter,
+    /// Latest token/cost/context report, shown in the status bar.
+    usage: UsageReport,
 }
 
 impl App {
@@ -71,6 +75,7 @@ impl App {
             history_cursor: None,
             debug: config.debug,
             filter: UserModeFilter::new(),
+            usage: UsageReport::default(),
         };
         app.ingest_history(&config.history);
         app
@@ -240,6 +245,9 @@ impl App {
                 self.running = false;
                 self.status = "ready".into();
             }
+            AgentEvent::Usage(report) => {
+                self.usage = *report;
+            }
             _ => {}
         }
     }
@@ -299,6 +307,9 @@ impl App {
                 self.push_plain(format!("error: {message}"), Color::Red);
             }
             AgentEvent::TurnFinished => {}
+            AgentEvent::Usage(report) => {
+                self.push_plain(format!("• {}", usage_summary(report)), Color::DarkGray);
+            }
         }
     }
 
@@ -329,6 +340,28 @@ fn label(text: &str, color: Color) -> Span<'static> {
         format!("{text}:"),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )
+}
+
+/// One-line token/cost/context summary shared by the status bar and the debug
+/// transcript: `tok 12.3k · $0.0042 · ctx 12.3k/128.0k (10%)`.
+fn usage_summary(report: &UsageReport) -> String {
+    let mut parts = vec![format!(
+        "tok {}",
+        format_tokens(report.total.normalized_total())
+    )];
+    if let (Some(turn), Some(total)) = (report.turn_cost_usd, report.total_cost_usd) {
+        parts.push(format!("turn {}", format_cost(turn)));
+        parts.push(format!("total {}", format_cost(total)));
+    }
+    if let Some(pct) = report.context_percent() {
+        parts.push(format!(
+            "ctx {}/{} ({:.0}%)",
+            format_tokens(report.context_tokens),
+            format_tokens(report.context_window.unwrap_or(0)),
+            pct
+        ));
+    }
+    parts.join(" · ")
 }
 
 /// Run the TUI until the user quits.
@@ -577,6 +610,14 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
             Color::Green
         }),
     )];
+    // Tokens, cost and context fullness are useful in both modes, so they are
+    // not gated behind `debug`.
+    if !app.usage.total.is_empty() || app.usage.context_tokens > 0 {
+        status_spans.push(Span::styled(
+            format!("| {} ", usage_summary(&app.usage)),
+            Style::default().fg(Color::LightCyan),
+        ));
+    }
     if app.debug {
         status_spans.push(Span::styled(
             format!("| {} / {} ", config.provider_name, config.model),
@@ -921,5 +962,39 @@ mod tests {
         assert!(text.contains("¿Preferís A o B?"));
         assert!(!text.contains("Voy a revisar"));
         assert!(!text.contains("read_file"));
+    }
+
+    #[test]
+    fn usage_summary_reports_tokens_cost_and_context() {
+        use harness_core::TokenUsage;
+        let report = UsageReport {
+            total: TokenUsage {
+                prompt_tokens: 10_000,
+                completion_tokens: 2_000,
+                total_tokens: 12_000,
+            },
+            turn_cost_usd: Some(0.0042),
+            total_cost_usd: Some(0.0100),
+            context_tokens: 64_000,
+            context_window: Some(128_000),
+            ..Default::default()
+        };
+        let text = usage_summary(&report);
+        assert!(text.contains("tok 12.0k"), "{text}");
+        assert!(text.contains("$0.0042"), "{text}");
+        assert!(text.contains("ctx 64.0k/128.0k (50%)"), "{text}");
+    }
+
+    #[test]
+    fn usage_is_tracked_from_agent_events() {
+        let mut app = app(false);
+        app.on_agent_event(AgentEvent::Usage(UsageReport {
+            total: harness_core::TokenUsage {
+                total_tokens: 500,
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+        assert_eq!(app.usage.total.total_tokens, 500);
     }
 }

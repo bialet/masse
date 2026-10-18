@@ -51,11 +51,13 @@ async fn agent_runs_a_tool_then_finishes() {
             arguments: r#"{"path":"hi.txt","content":"hola"}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
     responses.push_back(ChatResponse {
         content: "done".into(),
         tool_calls: vec![],
         finish_reason: Some("stop".into()),
+        usage: Default::default(),
     });
 
     let provider = Arc::new(ScriptedProvider {
@@ -434,12 +436,14 @@ async fn a_wren_change_is_nudged_before_the_model_can_stop() {
             arguments: r#"{"path":"app.wren","content":"// app"}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
     // The model tries to stop with a summary right after editing.
     responses.push_back(ChatResponse {
         content: "listo, ya está".into(),
         tool_calls: vec![],
         finish_reason: Some("stop".into()),
+        usage: Default::default(),
     });
     // After the syntax nudge it tries to finish; after the test nudge it is
     // finally allowed.
@@ -451,6 +455,7 @@ async fn a_wren_change_is_nudged_before_the_model_can_stop() {
             arguments: r#"{"summary":"primero","success":true}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
     responses.push_back(ChatResponse {
         content: String::new(),
@@ -460,6 +465,7 @@ async fn a_wren_change_is_nudged_before_the_model_can_stop() {
             arguments: r#"{"summary":"verificado","success":true}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
 
     let provider = Arc::new(ScriptedProvider {
@@ -507,11 +513,13 @@ async fn a_question_after_a_wren_change_is_not_nudged() {
             arguments: r#"{"path":"app.wren","content":"// app"}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
     responses.push_back(ChatResponse {
         content: "¿Preferís A o B?".into(),
         tool_calls: vec![],
         finish_reason: Some("stop".into()),
+        usage: Default::default(),
     });
 
     let provider = Arc::new(ScriptedProvider {
@@ -540,6 +548,7 @@ async fn finish_after_a_wren_change_is_held_for_syntax_then_tests() {
             arguments: r#"{"path":"app.wren","content":"// app"}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
     // Three finishes: syntax nudge, then test nudge, then allowed.
     for (id, summary) in [("c2", "primero"), ("c3", "segundo"), ("c4", "tercero")] {
@@ -551,6 +560,7 @@ async fn finish_after_a_wren_change_is_held_for_syntax_then_tests() {
                 arguments: format!(r#"{{"summary":"{summary}","success":true}}"#),
             }],
             finish_reason: Some("tool_calls".into()),
+            usage: Default::default(),
         });
     }
 
@@ -659,11 +669,13 @@ async fn auto_commit_commits_after_a_turn() {
             arguments: r#"{"path":"f.txt","content":"hi"}"#.into(),
         }],
         finish_reason: None,
+        usage: Default::default(),
     });
     responses.push_back(ChatResponse {
         content: "done".into(),
         tool_calls: vec![],
         finish_reason: None,
+        usage: Default::default(),
     });
     let provider = Arc::new(ScriptedProvider {
         responses: Mutex::new(responses),
@@ -787,6 +799,7 @@ async fn invalid_json_arguments_are_reported_honestly() {
             arguments: r#"{"path":"hi.txt","content":"hola"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
     responses.push_back(ChatResponse {
         content: String::new(),
@@ -796,6 +809,7 @@ async fn invalid_json_arguments_are_reported_honestly() {
             arguments: r#"{"summary":"blocked","success":false}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
 
     let provider = Arc::new(ScriptedProvider {
@@ -862,6 +876,7 @@ async fn finish_success_without_artifacts_is_rejected_once() {
             arguments: r#"{"summary":"listo","success":true}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
     responses.push_back(ChatResponse {
         content: String::new(),
@@ -871,6 +886,7 @@ async fn finish_success_without_artifacts_is_rejected_once() {
             arguments: r#"{"summary":"necesito una decisión","success":false}"#.into(),
         }],
         finish_reason: Some("tool_calls".into()),
+        usage: Default::default(),
     });
 
     let provider = Arc::new(ScriptedProvider {

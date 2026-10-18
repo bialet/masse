@@ -14,6 +14,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::message::ChatMessage;
 use crate::provider::{ChatRequest, Provider};
+use crate::usage::{context_window_for, pricing_for, ModelPricing, TokenUsage, UsageReport};
 
 /// Tunables for a single agent.
 #[derive(Clone, Debug)]
@@ -31,6 +32,10 @@ pub struct AgentConfig {
     /// `auto_commit`.
     pub auto_push: bool,
     pub system_prompt: String,
+    /// Override the built-in price for prompt tokens, in USD per million.
+    pub price_input: Option<f64>,
+    /// Override the built-in price for completion tokens, in USD per million.
+    pub price_output: Option<f64>,
 }
 
 impl Default for AgentConfig {
@@ -44,6 +49,8 @@ impl Default for AgentConfig {
             auto_commit: false,
             auto_push: false,
             system_prompt: String::new(),
+            price_input: None,
+            price_output: None,
         }
     }
 }
@@ -510,6 +517,9 @@ pub enum AgentEvent {
     },
     /// Informational note (e.g. the iteration cap was reached).
     Notice(String),
+    /// Tokens and estimated cost after a turn, plus how full the context window
+    /// is. Emitted once per turn, just before the terminal event.
+    Usage(UsageReport),
     /// The agent declared the task finished via the `finish` tool.
     Finished {
         summary: String,
@@ -531,6 +541,12 @@ pub struct Agent {
     /// Whether the git repo was prepared for auto-commit: `None` = not tried,
     /// `Some(true)` = ready, `Some(false)` = setup failed.
     repo_ready: Option<bool>,
+    /// Tokens accumulated over every completion in this process.
+    usage_total: TokenUsage,
+    /// Prompt tokens of the most recent completion (context size), and the
+    /// tokens of the current turn. Reset per turn for the latter.
+    context_tokens: u64,
+    turn_usage: TokenUsage,
 }
 
 impl Agent {
@@ -558,6 +574,9 @@ impl Agent {
             config,
             messages,
             repo_ready: None,
+            usage_total: TokenUsage::default(),
+            context_tokens: 0,
+            turn_usage: TokenUsage::default(),
         })
     }
 
@@ -633,6 +652,50 @@ impl Agent {
         self.provider.name()
     }
 
+    /// Fold one completion's usage into the running totals. Context size is the
+    /// prompt of the most recent call, not a sum: it is how full the window is.
+    fn record_usage(&mut self, usage: TokenUsage) {
+        if !usage.is_empty() {
+            self.usage_total.add(usage);
+            self.turn_usage.add(usage);
+            self.context_tokens = usage.prompt_tokens;
+        }
+    }
+
+    /// The price in effect for the current model: the command-line override where
+    /// given, layered over the built-in table. `None` when neither applies.
+    fn pricing(&self) -> Option<ModelPricing> {
+        let table = pricing_for(&self.config.model);
+        if self.config.price_input.is_none() && self.config.price_output.is_none() {
+            return table;
+        }
+        Some(ModelPricing {
+            input_per_million: self
+                .config
+                .price_input
+                .or_else(|| table.map(|p| p.input_per_million))
+                .unwrap_or(0.0),
+            output_per_million: self
+                .config
+                .price_output
+                .or_else(|| table.map(|p| p.output_per_million))
+                .unwrap_or(0.0),
+        })
+    }
+
+    /// Snapshot of this turn's and the session's usage for the front ends.
+    fn usage_report(&self) -> UsageReport {
+        let price = self.pricing();
+        UsageReport {
+            turn: self.turn_usage,
+            total: self.usage_total,
+            turn_cost_usd: price.map(|p| p.cost(self.turn_usage)),
+            total_cost_usd: price.map(|p| p.cost(self.usage_total)),
+            context_tokens: self.context_tokens,
+            context_window: context_window_for(&self.config.model),
+        }
+    }
+
     /// Run one user turn to completion.
     ///
     /// Exactly one terminal event (`Finished`, `TurnFinished` or `Error`) is
@@ -657,6 +720,9 @@ impl Agent {
 
         let result = self.run_turn(text, sink).await;
         if let Some(s) = sink {
+            // Report tokens and cost before the terminal event, so the front end
+            // has the numbers when it settles the turn.
+            let _ = s.send(AgentEvent::Usage(self.usage_report()));
             match &result {
                 Ok(TurnOutcome::Stopped(_)) => {
                     let _ = s.send(AgentEvent::TurnFinished);
@@ -722,6 +788,7 @@ impl Agent {
         emit!(AgentEvent::UserMessage(text.to_string()));
         self.session.append(&Event::user_message(text)).await?;
         self.messages.push(ChatMessage::user(text));
+        self.turn_usage = TokenUsage::default();
 
         // Definition-of-done tracking: did we change Wren code since the last
         // green test run, and have we already nudged once this turn?
@@ -788,6 +855,8 @@ impl Agent {
                     }
                 }
             };
+
+            self.record_usage(response.usage);
 
             if !response.content.trim().is_empty() {
                 emit!(AgentEvent::AssistantMessage(response.content.clone()));
@@ -1216,6 +1285,7 @@ impl Agent {
         };
         match self.provider.complete(wrap_request).await {
             Ok(response) => {
+                self.record_usage(response.usage);
                 if !response.content.trim().is_empty() {
                     emit!(AgentEvent::AssistantMessage(response.content.clone()));
                     self.session

@@ -9,6 +9,7 @@ pub mod message;
 pub mod present;
 pub mod prompt;
 pub mod provider;
+pub mod usage;
 
 pub use agent::{rebuild_messages, Agent, AgentConfig, AgentEvent, AgentHandle};
 pub use context::ProjectContext;
@@ -20,4 +21,8 @@ pub use prompt::build_system_prompt;
 pub use provider::{
     ChatRequest, ChatResponse, MockProvider, OpenAiProvider, Provider, ProviderError,
     ProviderResult,
+};
+pub use usage::{
+    context_window_for, format_cost, format_tokens, pricing_for, ModelPricing, TokenUsage,
+    UsageReport,
 };

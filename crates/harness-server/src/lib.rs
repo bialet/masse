@@ -490,6 +490,18 @@ fn agent_event_json(ev: &AgentEvent) -> JsonValue {
             "reason": reason,
         }),
         AgentEvent::Notice(message) => json!({ "kind": "notice", "message": message }),
+        AgentEvent::Usage(report) => json!({
+            "kind": "usage",
+            "turn_tokens": report.turn.normalized_total(),
+            "total_tokens": report.total.normalized_total(),
+            "prompt_tokens": report.total.prompt_tokens,
+            "completion_tokens": report.total.completion_tokens,
+            "turn_cost_usd": report.turn_cost_usd,
+            "total_cost_usd": report.total_cost_usd,
+            "context_tokens": report.context_tokens,
+            "context_window": report.context_window,
+            "context_percent": report.context_percent(),
+        }),
         AgentEvent::Finished { summary, success } => json!({
             "kind": "finished",
             "summary": summary,
@@ -548,7 +560,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </style>
 </head>
 <body>
-<header>masse · <span id="spinner" hidden>⠋</span> <span id="status">connecting…</span> <span id="mode"></span></header>
+<header>masse · <span id="spinner" hidden>⠋</span> <span id="status">connecting…</span> <span id="mode"></span> <span id="usage"></span></header>
 <div id="log"></div>
 <footer>
   <button id="attach" type="button" title="Attach a spreadsheet">Attach</button>
@@ -559,6 +571,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <script>
 const logEl = document.getElementById('log');
 const statusEl = document.getElementById('status');
+const usageEl = document.getElementById('usage');
 const inputEl = document.getElementById('msg');
 const sendEl = document.getElementById('send');
 const spinnerEl = document.getElementById('spinner');
@@ -676,6 +689,8 @@ function renderLiveEvent(ev) {
     if (DEBUG) append('tool', '  ↻ retry ' + ev.attempt + '/' + ev.max + ' (' + ev.reason + ')');
   } else if (ev.kind === 'notice') {
     if (DEBUG) append('result', '  • ' + ev.message);
+  } else if (ev.kind === 'usage') {
+    renderUsage(ev);
   } else if (ev.kind === 'finished') {
     setWorking(false);
     if (DEBUG) {
@@ -696,6 +711,30 @@ function renderLiveEvent(ev) {
     pending = null;
     append('error', 'error: ' + ev.message);
   }
+}
+
+// Token/cost/context summary in the header, shown in both modes.
+function fmtTokens(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+function fmtCost(usd) {
+  if (usd == null) return '—';
+  if (usd > 0 && usd < 0.0001) return '<$0.0001';
+  return '$' + usd.toFixed(4);
+}
+function renderUsage(ev) {
+  const parts = ['tok ' + fmtTokens(ev.total_tokens)];
+  if (ev.total_cost_usd != null) {
+    parts.push('turn ' + fmtCost(ev.turn_cost_usd));
+    parts.push('total ' + fmtCost(ev.total_cost_usd));
+  }
+  if (ev.context_percent != null) {
+    parts.push('ctx ' + fmtTokens(ev.context_tokens) + '/' + fmtTokens(ev.context_window) +
+               ' (' + ev.context_percent.toFixed(0) + '%)');
+  }
+  usageEl.textContent = '· ' + parts.join(' · ');
 }
 
 function connect() {
@@ -781,6 +820,26 @@ connect();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_events_expose_tokens_cost_and_context() {
+        let value = agent_event_json(&AgentEvent::Usage(harness_core::UsageReport {
+            total: harness_core::TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 20,
+                total_tokens: 120,
+            },
+            context_tokens: 64,
+            context_window: Some(128),
+            turn_cost_usd: Some(0.001),
+            total_cost_usd: Some(0.002),
+            ..Default::default()
+        }));
+        assert_eq!(value["kind"], "usage");
+        assert_eq!(value["total_tokens"], 120);
+        assert_eq!(value["turn_cost_usd"], 0.001);
+        assert_eq!(value["context_percent"], 50.0);
+    }
 
     #[test]
     fn assistant_events_carry_rendered_html() {
