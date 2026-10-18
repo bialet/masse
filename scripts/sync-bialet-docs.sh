@@ -44,16 +44,19 @@ from pathlib import Path
 
 notes = {
     "template.md":
-        "> **masse note:** `toString` is a getter in Wren. Write `val.toString`, "
-        "never `val.toString()`: the call form raises `String does not implement "
-        "'toString()'`. The same applies to `trim`, `count`, `keys` and `values`.",
+        "> **masse note:** `toString` is a getter in Wren and `trim` is a method. "
+        "Write `val.toString.trim()`, never `val.toString()` (raises `String does "
+        "not implement 'toString()'`) and never `val.toString.trim` (raises "
+        "`String does not implement 'trim'`).",
     "prompt-guide.md":
         "> **masse note:** `toString` is a getter in Wren. Write `val.toString`, "
         "never `val.toString()`. See `bialet-pitfalls.md` for the other traps.",
     "database.md":
         "> **masse note:** Query methods take at most three positional arguments; "
         "pass one List for four or more (`fetch([a,b,c,d])`). `BIALET_CONFIG` "
-        "stores `(key, val)`, not `(key, value)`.",
+        "stores `(key, val)`, not `(key, value)`. Do not call `Date.new()` inside "
+        "a `Db.migrate` callback: `Date` is not initialized yet and Bialet "
+        "crashes with SIGSEGV; seed dates with SQL `date('now')` instead.",
     "datetime.md":
         "> **masse note:** never compare a Date to null with `date == null`; it "
         "calls `Date.==` and crashes on `other.unix`. Use `if (!date)` or "

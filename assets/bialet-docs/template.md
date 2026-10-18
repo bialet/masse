@@ -1,4 +1,4 @@
-> **masse note:** `toString` is a getter in Wren. Write `val.toString`, never `val.toString()`: the call form raises `String does not implement 'toString()'`. The same applies to `trim`, `count`, `keys` and `values`.
+> **masse note:** `toString` is a getter in Wren and `trim` is a method. Write `val.toString.trim()`, never `val.toString()` (raises `String does not implement 'toString()'`) and never `val.toString.trim` (raises `String does not implement 'trim'`).
 
 # Template
 

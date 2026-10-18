@@ -1,4 +1,4 @@
-> **masse note:** Query methods take at most three positional arguments; pass one List for four or more (`fetch([a,b,c,d])`). `BIALET_CONFIG` stores `(key, val)`, not `(key, value)`.
+> **masse note:** Query methods take at most three positional arguments; pass one List for four or more (`fetch([a,b,c,d])`). `BIALET_CONFIG` stores `(key, val)`, not `(key, value)`. Do not call `Date.new()` inside a `Db.migrate` callback: `Date` is not initialized yet and Bialet crashes with SIGSEGV; seed dates with SQL `date('now')` instead.
 
 # Database
 

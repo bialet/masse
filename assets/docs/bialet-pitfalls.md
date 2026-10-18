@@ -4,15 +4,17 @@ These are the traps that repeatedly cost entire turns in real app builds. Each
 one was reproduced with `bialet -r` or against a running app; the error text is
 the one Bialet actually prints.
 
-## 1. `toString` is a getter, not a method
+## 1. `toString` is a getter; `trim` is a method
 
 ```wren
-name=(val) { _name = val.toString.trim }      // correct
+name=(val) { _name = val.toString.trim() }    // correct
 // name=(val) { _name = val.toString().trim() } // String does not implement 'toString()'
+// name=(val) { _name = val.toString.trim }     // String does not implement 'trim'
 ```
 
-Wren resolves `toString` as a property. Adding `()` turns it into a missing
-method. Same for `.trim`, `.count`, `.keys`, `.values`: no parentheses.
+`toString`, `count`, `keys` and `values` are getters: no parentheses.
+`trim` is a **method**: it needs `()`. Mixing the two forms is the single most
+common source of 500s in setters.
 
 ## 2. Never compare a Date (or a user class) to `null` with `date == null`
 
@@ -138,7 +140,142 @@ form value with the helper.
 viewport meta tag. Assert on visible, unique text (a heading, a row label), not
 on a substring that appears in the HTML boilerplate.
 
-## 14. `bialet_run` is not a request
+## 14. Do not nest the same outermost HTML tag
+
+Bialet's inline-HTML parser rejects an outermost tag that also appears as a
+direct child at any level:
+
+```wren
+var bad = <section><section>Nested</section></section>
+// Cannot nest <section> inside <section>
+```
+
+The error points at the closing tag, not the opening one, which makes it hard
+to find. Wrap with a different tag (`<div><section>...`) or split the view into
+partials. Other tags can nest normally once the outer tag differs.
+
+## 15. Assigning a property needs an explicit setter
+
+```wren
+class Wine {
+  id { _id }
+  id=(value) { _id = value }   // without this line `wine.id = x` fails
+}
+```
+
+Wren does not synthesize setters. `Wine does not implement 'id=(_)'` means the
+getter exists but the setter does not. The constructor writing `_id` is not a
+public setter.
+
+## 16. Do not put a Query inside `%(...)` or `{{ }}`
+
+```wren
+// wrong: Query are not allowed inside handlebars or interpolated expressions
+System.log("rows: %(`SELECT COUNT(*) FROM loans`.toNum)")
+
+// correct
+var count = `SELECT COUNT(*) FROM loans`.toNum
+System.log("rows: %(count)")
+```
+
+This bites hardest in `_tests/_init.wren`, where the whole suite then fails
+before the app is exercised.
+
+## 17. Aggregates return null on an empty table
+
+`SELECT MAX(id)`, `SELECT SUM(x)` and friends return null when there are no
+rows. `null + 1` crashes. Use a default:
+
+```wren
+var max = `SELECT COALESCE(MAX(CAST(number AS INTEGER)), 0) FROM members`.toNum
+```
+
+This is the classic `/nuevo` 500 on a brand-new database.
+
+## 18. `List` has no `reverse`
+
+`[1,2,3].reverse` raises `List does not implement 'reverse'`. Build a new list:
+
+```wren
+var out = []
+for (i in 0...xs.count) out.add(xs[xs.count - 1 - i])
+```
+
+## 19. CSRF is on the `session` instance, and tests have no cookie jar
+
+```wren
+var session = Session.new()
+if (Request.isPost) {
+  if (!session.csrfOk && !Config.bool("test_mode")) return Response.status(403)
+  ...
+}
+{{ session.csrf }}
+```
+
+`Session.csrf` / `Session.csrfOk` are **not** static: they are members of
+`session = Session.new()`. In tests, `Test.post` cannot reuse the token from a
+previous `Test.get` (there is no cookie jar), so a CSRF-protected form returns
+200 instead of 302. Make the check test-aware with a config flag and set it
+once in `_tests/_init.wren`:
+
+```wren
+// _tests/_init.wren
+Config.set("test_mode", "1")
+```
+
+Never disable CSRF outside the test flag.
+
+## 20. Zero-argument methods still need `()`
+
+```wren
+class Klass {
+  static total() { 42 }
+}
+Klass.total()   // correct
+// Klass.total  -> the method object, not the number
+```
+
+Getters (`count`, `toString`, `keys`) are defined without parentheses and
+called without them. If you wrote `total() { ... }`, call it with `()`.
+
+## 21. `Map` has no `get(key)`
+
+```wren
+var m = {"a": 1}
+m["a"]              // 1
+m["missing"]        // null
+// m.get("a")       // Map does not implement 'get(_)'
+m.containsKey("a")  // true
+```
+
+## 22. `_init.wren` runs once; do not collide with UNIQUE keys
+
+A test that inserts the same unique value as `_tests/_init.wren` fails before it
+exercises anything. Use `INSERT OR IGNORE`, or seed distinct values per file.
+
+## 23. Do not call `Date.new()` inside a `Db.migrate` callback
+
+`Db.migrate` callbacks run before `Date.init`, so any date construction or date
+arithmetic there crashes the whole process with SIGSEGV (exit 139) and the app
+never boots:
+
+```wren
+// wrong: Date is not initialized yet
+Db.migrate("Seed", Fn.new {
+  var today = Date.new()
+  ...
+})
+
+// correct: let SQL produce the date
+Db.migrate("Seed", `
+  INSERT INTO entries (day) VALUES (date('now'))
+`)
+```
+
+Seed dates with SQL (`date('now')`, `strftime`) or lazily from a route/domain
+method after the app is up.
+
+## 24. `bialet_run` is not a request
 
 `bialet_run` has no `BIALET_*` tables, no session and no router. `Session.new()`,
 `Config.get(...)` and app queries fail there. Use `_tests/` + `bialet_test`, or

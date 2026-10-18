@@ -139,7 +139,10 @@ var rows = `SELECT name, amount FROM expenses ORDER BY id`.fetch
 var lines = ["concepto,importe"]
 for (row in rows) {
   var name = "%(row["name"])".replace("\"", "\"\"")
-  lines.add("\"%(name)\",%(row["amount"])")
+  // Quote every field, including numbers: "12.500,50" contains a comma and
+  // would shift the columns if it were left bare.
+  var amount = "%(row["amount"])".replace("\"", "\"\"")
+  lines.add("\"%(name)\",\"%(amount)\"")
 }
 
 Response.header("Content-Type", "text/csv; charset=utf-8")

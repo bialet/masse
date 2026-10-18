@@ -253,7 +253,7 @@ fn debug_probe_files(root: &Path) -> Vec<String> {
                 continue;
             }
             let lower = name.to_lowercase();
-            if lower.ends_with(".wren") && (lower.starts_with("debug") || lower.contains("probe")) {
+            if lower.ends_with(".wren") && (lower.contains("debug") || lower.contains("probe")) {
                 if let Ok(relative) = path.strip_prefix(root) {
                     out.push(relative.display().to_string());
                 }
@@ -1283,6 +1283,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".masse")).unwrap();
         std::fs::write(dir.join("debug1.wren"), "// probe").unwrap();
         std::fs::write(dir.join("_tests/debug2.wren"), "// probe").unwrap();
+        std::fs::write(dir.join("_tests/zz-debug.wren"), "// probe").unwrap();
         std::fs::write(dir.join("csrfprobe.wren"), "// probe").unwrap();
         std::fs::write(dir.join("app.wren"), "// app").unwrap();
         std::fs::write(dir.join("_app/domain.wren"), "class A {}").unwrap();
@@ -1293,6 +1294,7 @@ mod tests {
             found,
             vec![
                 "_tests/debug2.wren".to_string(),
+                "_tests/zz-debug.wren".to_string(),
                 "csrfprobe.wren".to_string(),
                 "debug1.wren".to_string(),
             ],

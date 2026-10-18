@@ -55,8 +55,14 @@ How to work:
   - Every method that produces a value needs an explicit `return`. Wren does
     not return the last expression; a missing `return` yields null, and
     `for (row in null)` crashes the process (SIGSEGV, empty reply).
-  - `toString`, `trim`, `count`, `keys` and `values` are getters: write
-    `val.toString`, never `val.toString()`.
+  - Every property you assign (`obj.field = x`) needs an explicit
+    `field=(x)` setter; Wren does not synthesize it.
+  - A method you define with `name()` must be called with `()` (`Klass.total()`);
+    only getters (`count`, `toString`) omit the parentheses. `Map` uses
+    `m["key"]`, not `m.get("key")`.
+  - `toString`, `count`, `keys` and `values` are getters: write `val.toString`.
+    `trim` is a method: the canonical setter is `val.toString.trim()`.
+    `val.toString()` and `val.toString.trim` both fail at runtime.
   - Never compare a Date to null with `date == null` (it calls `Date.==` and
     crashes on `other.unix`). Use `if (!date)` or `if (null == date)`.
   - A literal `%` in a Wren string is `\x25`; `"100%"` does not compile. In an
@@ -65,6 +71,9 @@ How to work:
     four or more (`fetch([a,b,c,d])`).
   - `BIALET_CONFIG` has columns `(key, val)`; use `Config.set`, never a raw
     `INSERT ... (key, value)`.
+  - Do not call `Date.new()` or do date arithmetic inside a `Db.migrate`
+    callback: `Date` is not initialized yet and Bialet crashes with SIGSEGV.
+    Let SQL produce dates (`date('now')`) or seed after boot.
   - Every file imports what it uses. A template that calls a domain helper
     needs its own `import "/_app/domain" for Periods`.
 - Keep every tool argument small (well under 8 KB). Split a large file into a
@@ -83,11 +92,16 @@ How to work:
   is no `describe`/`it`/`expect` API, and `Test` is already in scope, so never
   `import "bialet/test" for Test` (that fails with "Module variable is already
   defined"). A form change must assert that POST → read round-trip (submit the
-  values, then read the page back), not just that the page renders.
+  values, then read the page back), not just that the page renders. Never weaken
+  an assertion to make a failing test pass: fix the app, or explain why the
+  expectation itself was wrong.
 - Keep the test suite small and quiet. All files in `_tests/` share one
   temporary database per run, so do not assume isolation; seed shared rows in
   `_tests/_init.wren`. Never `System.print` a whole table, and delete any
-  `debug*.wren` file you created before finishing.
+  `debug*.wren` file you created before finishing. If the app checks CSRF
+  (`session.csrfOk`), gate it with `Config.bool("test_mode")` and set that in
+  `_init.wren`: `Test.post` has no cookie jar and cannot reuse the token from a
+  previous GET.
 - Test by hand too when it helps: the `curl` tool posts to the local Bialet
   server started by `bialet_server_start` (it accepts the same `data` body the
   browser would). It is confined to that server's loopback port — it cannot
@@ -258,8 +272,9 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
          `forms.md`, `http-calls.md`, `file.md`, `configuration.md`, `security.md`, \
          `deployment.md`, `rest-api.md`, `usage.md`, `tests.md`, `template.md`), \
          or `list=true` to see every page. `bialet-pitfalls.md` lists the \
-         Wren/Bialet traps (getters, missing `return`, null iteration, `%`, \
-         Query arity, imports). `bialet-recipes.md` has verified answers for \
+         Wren/Bialet traps (getters vs methods, missing `return`, setters, \
+         null iteration, nested HTML tags, Query arity/interpolation, `%`, \
+         CSRF in tests, imports). `bialet-recipes.md` has verified answers for \
          date arithmetic, money formatting (including `1.234,50`), CSV \
          downloads, `Util`/`Config`, and test hygiene. Prefer reading the docs \
          over guessing API names with `bialet_run`.\n",
