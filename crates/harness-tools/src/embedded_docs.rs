@@ -154,6 +154,7 @@ mod tests {
             "wren-string.md",
             "wren-list.md",
             "bialet-recipes.md",
+            "bialet-pitfalls.md",
         ] {
             let doc = get(name).unwrap_or_else(|| panic!("{name} is not embedded"));
             assert!(doc.content.contains('#'), "{name} has no heading");

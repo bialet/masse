@@ -918,11 +918,10 @@ async fn a_probe_loop_is_aborted_instead_of_burning_the_budget() {
     .await
     .unwrap();
 
-    let err = agent
+    let text = agent
         .send("build it", None)
         .await
-        .expect_err("the probe loop must be aborted");
-    let text = err.to_string();
+        .expect("the probe loop ends with a stopped outcome, not an Err");
     let events = session2.read_all().await.unwrap();
     assert_eq!(
         events

@@ -1,3 +1,5 @@
+> **masse note:** `toString` is a getter in Wren. Write `val.toString`, never `val.toString()`: the call form raises `String does not implement 'toString()'`. The same applies to `trim`, `count`, `keys` and `values`.
+
 # Template
 
 Bialet renders pages using Inline HTML Strings — HTML written directly inside

@@ -1,3 +1,5 @@
+> **masse note:** Query methods take at most three positional arguments; pass one List for four or more (`fetch([a,b,c,d])`). `BIALET_CONFIG` stores `(key, val)`, not `(key, value)`.
+
 # Database
 
 Bialet includes the [SQLite](https://www.sqlite.org/) library for its database.

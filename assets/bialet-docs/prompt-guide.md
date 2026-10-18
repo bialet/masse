@@ -1,3 +1,5 @@
+> **masse note:** `toString` is a getter in Wren. Write `val.toString`, never `val.toString()`. See `bialet-pitfalls.md` for the other traps.
+
 # Bialet Project Development Prompt
 
 You are an expert in **Bialet**, a full-stack web framework that integrates the

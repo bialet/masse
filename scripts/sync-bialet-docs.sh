@@ -35,6 +35,42 @@ rsync -a --delete --prune-empty-dirs \
   --exclude='*' \
   "$SRC/" "$DST/"
 
+# The upstream docs contain a few examples that do not run (notably
+# `val.toString()`). Add a short, non-destructive note at the top of the pages
+# where the wrong form appears, and re-apply it on every sync.
+python3 - "$DST" <<'PY'
+import sys
+from pathlib import Path
+
+notes = {
+    "template.md":
+        "> **masse note:** `toString` is a getter in Wren. Write `val.toString`, "
+        "never `val.toString()`: the call form raises `String does not implement "
+        "'toString()'`. The same applies to `trim`, `count`, `keys` and `values`.",
+    "prompt-guide.md":
+        "> **masse note:** `toString` is a getter in Wren. Write `val.toString`, "
+        "never `val.toString()`. See `bialet-pitfalls.md` for the other traps.",
+    "database.md":
+        "> **masse note:** Query methods take at most three positional arguments; "
+        "pass one List for four or more (`fetch([a,b,c,d])`). `BIALET_CONFIG` "
+        "stores `(key, val)`, not `(key, value)`.",
+    "datetime.md":
+        "> **masse note:** never compare a Date to null with `date == null`; it "
+        "calls `Date.==` and crashes on `other.unix`. Use `if (!date)` or "
+        "`if (null == date)`.",
+}
+root = Path(sys.argv[1])
+for name, note in notes.items():
+    page = root / name
+    if not page.is_file():
+        continue
+    text = page.read_text(encoding="utf-8")
+    marker = note.split("**")[1]
+    if marker in text.splitlines()[0] if text else False:
+        continue
+    page.write_text(note + "\n\n" + text, encoding="utf-8")
+PY
+
 pages=$(find "$DST" -type f | wc -l | tr -d ' ')
 bytes=$(find "$DST" -type f -exec cat {} + | wc -c | tr -d ' ')
 echo "synced $pages documentation files ($bytes bytes) from $SRC to $DST"

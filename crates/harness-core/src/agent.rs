@@ -143,6 +143,14 @@ const PROGRESS_NUDGE: &str = "You have made many tool calls without creating or 
 Stop exploring and build: write `_app/migration.wren`, `_app/domain.wren`, `_app/template.wren` and the route files now. \
 If an API is unclear, consult `bialet_docs` once and write the simplest version; the validator and the tests will tell you what is wrong.";
 
+const PROGRESS_FINISH_NUDGE: &str = "You have already written files, so stop probing and close the turn. \
+Run `bialet_test` once, delete any `debug*.wren` / `*probe*.wren` files you created, and call `finish` with a short summary. \
+If something is still missing, say exactly what and finish with `success=false`. Do not keep running one-off snippets.";
+
+const FINISH_AFTER_BUILD: &str = "You built files but the turn ended without calling `finish`. \
+Run `bialet_test` one last time if you changed anything, delete debug/probe files, and call `finish` with a short summary. \
+If the task is incomplete or you need a decision, call `finish` with `success=false` and say what is missing.";
+
 const FINISH_WITHOUT_ARTIFACT: &str = "You are about to finish with `success=true`, but this turn did not create or edit any file and the project has no `.wren` file. \
 That means the task is not built. If you still have steps to carry out, do them now. If you need an answer from the user, call `finish` again with `success=false` and put the question in the summary. \
 Do not report success for work that does not exist.";
@@ -222,6 +230,55 @@ fn workspace_has_wren(root: &Path) -> bool {
         false
     }
     walk(root, 0)
+}
+
+/// Files the model created while probing and usually forgets to delete.
+/// Leaving them behind makes later runs slower and buries the real failures.
+fn debug_probe_files(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, depth: usize, out: &mut Vec<String>) {
+        if depth > 3 || out.len() >= 20 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if matches!(name.as_str(), ".git" | ".masse" | "node_modules" | "target") {
+                    continue;
+                }
+                walk(&path, root, depth + 1, out);
+                continue;
+            }
+            let lower = name.to_lowercase();
+            if lower.ends_with(".wren") && (lower.starts_with("debug") || lower.contains("probe")) {
+                if let Ok(relative) = path.strip_prefix(root) {
+                    out.push(relative.display().to_string());
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, 0, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn probe_files_message(files: &[String]) -> String {
+    let shown = files.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+    let extra = files.len().saturating_sub(8);
+    let tail = if extra > 0 {
+        format!(" (+{extra} more)")
+    } else {
+        String::new()
+    };
+    format!(
+        "Before finishing, delete the temporary probe/debug files you created: {shown}{tail}. \
+         They are not part of the app; only the final app files should remain. Then call `finish` again."
+    )
 }
 
 fn invalid_arguments_message(tool: &str, bytes: usize) -> String {
@@ -585,8 +642,10 @@ impl Agent {
         // task, however many docs it reads.
         let mut calls_without_mutation: u32 = 0;
         let mut progress_nudged = false;
+        let mut progress_finish_nudged = false;
         let mut mutated_this_turn = false;
         let mut finish_nudged = false;
+        let mut cleanup_nudged = false;
         let mut invalid_args_nudged = false;
 
         for _ in 0..self.config.max_iterations {
@@ -658,6 +717,23 @@ impl Agent {
                         self.messages.push(ChatMessage::user(nudge));
                         continue;
                     }
+                }
+                // The model built an app but went quiet without `finish`. Ask
+                // once for the explicit outcome; without this the runner
+                // reports `turn_finished` even when the app is complete. Do not
+                // nudge a plain question: the user needs to see it.
+                if !finish_nudged
+                    && mutated_this_turn
+                    && workspace_has_wren(&self.ctx.root)
+                    && !looks_like_question(&response.content)
+                {
+                    finish_nudged = true;
+                    emit!(AgentEvent::Notice(
+                        "turn ended without finish after writing Wren files; asking for a final summary"
+                            .into()
+                    ));
+                    self.messages.push(ChatMessage::user(FINISH_AFTER_BUILD));
+                    continue;
                 }
                 return Ok(TurnOutcome::Stopped(response.content));
             }
@@ -812,12 +888,17 @@ impl Agent {
                         *c
                     };
                     if count >= STUCK_STOP_THRESHOLD {
-                        return Err(anyhow::anyhow!(
-                            "stopped: `{}` failed the same way {count} times in a row (last error: {}). \
-                             Repeating it cannot help; this turn is being aborted instead of burning the remaining iterations.",
-                            call.name,
-                            failure_hint
-                        ));
+                        let reason = format!(
+                            "Turn stopped: `{}` failed the same way {count} times (last error: {}). \
+                             Repeating it cannot help, so the harness aborted the turn instead of burning the remaining iterations. \
+                             The files written so far are kept.",
+                            call.name, failure_hint
+                        );
+                        emit!(AgentEvent::AssistantMessage(reason.clone()));
+                        self.session
+                            .append(&Event::assistant_message(&reason))
+                            .await?;
+                        return Ok(TurnOutcome::Stopped(reason));
                     }
                     if count >= STUCK_THRESHOLD && nudged_failures.insert(sig) {
                         nudge_after_batch.get_or_insert(STUCK_NUDGE);
@@ -831,11 +912,17 @@ impl Agent {
                 // A call shape repeated with only cosmetic changes is a probe,
                 // not work. Nudge once, then abort if it continues.
                 if shape_count >= CALL_SHAPE_STOP_THRESHOLD {
-                    return Err(anyhow::anyhow!(
-                        "stopped: `{}` was called {shape_count} times with the same arguments (ignoring numbers). \
-                         This is a probe loop, not progress; the turn is being aborted so it does not burn the iteration budget.",
+                    let reason = format!(
+                        "Turn stopped: `{}` was called {shape_count} times with the same arguments (ignoring numbers). \
+                         This is a probe loop, not progress; the remaining iterations would be wasted. \
+                         Read `bialet-pitfalls.md` and `bialet-recipes.md` before the next attempt.",
                         call.name
-                    ));
+                    );
+                    emit!(AgentEvent::AssistantMessage(reason.clone()));
+                    self.session
+                        .append(&Event::assistant_message(&reason))
+                        .await?;
+                    return Ok(TurnOutcome::Stopped(reason));
                 }
                 if shape_count >= CALL_SHAPE_NUDGE_THRESHOLD
                     && nudged_shapes.insert(shape_signature)
@@ -848,10 +935,27 @@ impl Agent {
                 }
 
                 if calls_without_mutation >= PROGRESS_STOP_THRESHOLD {
-                    return Err(anyhow::anyhow!(
-                        "stopped: {calls_without_mutation} tool calls in a row without creating or editing a file. \
-                         The model is stuck exploring instead of building; the turn is being aborted."
-                    ));
+                    if mutated_this_turn && !progress_finish_nudged {
+                        // The app exists; the model is over-verifying. Ask it
+                        // to close the turn instead of throwing the work away.
+                        progress_finish_nudged = true;
+                        calls_without_mutation = 0;
+                        nudge_after_batch.get_or_insert(PROGRESS_FINISH_NUDGE);
+                        emit!(AgentEvent::Notice(
+                            "app files exist but the model keeps probing; asking it to test once and finish"
+                                .into()
+                        ));
+                    } else {
+                        let reason = format!(
+                            "Turn stopped: {calls_without_mutation} tool calls in a row without creating or editing a file. \
+                             The model is stuck exploring instead of building; the files written so far are kept."
+                        );
+                        emit!(AgentEvent::AssistantMessage(reason.clone()));
+                        self.session
+                            .append(&Event::assistant_message(&reason))
+                            .await?;
+                        return Ok(TurnOutcome::Stopped(reason));
+                    }
                 }
                 if calls_without_mutation >= PROGRESS_NUDGE_THRESHOLD && !progress_nudged {
                     progress_nudged = true;
@@ -902,6 +1006,21 @@ impl Agent {
                             emit!(AgentEvent::Notice(
                                 "finish(success) rejected: the summary is a question".into()
                             ));
+                            break;
+                        }
+                    }
+                    // Probe files left behind make later runs slower and hide
+                    // the real failures. Ask once for them to be deleted.
+                    if t.success && !cleanup_nudged {
+                        let probes = debug_probe_files(&self.ctx.root);
+                        if !probes.is_empty() {
+                            cleanup_nudged = true;
+                            emit!(AgentEvent::Notice(format!(
+                                "finish(success) rejected: {} probe file(s) left behind",
+                                probes.len()
+                            )));
+                            self.messages
+                                .push(ChatMessage::user(probe_files_message(&probes)));
                             break;
                         }
                     }
@@ -1151,6 +1270,37 @@ mod tests {
         std::fs::create_dir_all(dir.join("_app")).unwrap();
         std::fs::write(dir.join("_app/domain.wren"), "class A {}").unwrap();
         assert!(workspace_has_wren(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_files_are_detected_and_reported() {
+        let dir = std::env::temp_dir().join(format!("masse-probes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("_tests")).unwrap();
+        std::fs::create_dir_all(dir.join("_app")).unwrap();
+        std::fs::create_dir_all(dir.join(".masse")).unwrap();
+        std::fs::write(dir.join("debug1.wren"), "// probe").unwrap();
+        std::fs::write(dir.join("_tests/debug2.wren"), "// probe").unwrap();
+        std::fs::write(dir.join("csrfprobe.wren"), "// probe").unwrap();
+        std::fs::write(dir.join("app.wren"), "// app").unwrap();
+        std::fs::write(dir.join("_app/domain.wren"), "class A {}").unwrap();
+        std::fs::write(dir.join(".masse/debug3.wren"), "// runtime").unwrap();
+
+        let found = debug_probe_files(&dir);
+        assert_eq!(
+            found,
+            vec![
+                "_tests/debug2.wren".to_string(),
+                "csrfprobe.wren".to_string(),
+                "debug1.wren".to_string(),
+            ],
+            "only app-level probe files should be reported: {found:?}"
+        );
+        let message = probe_files_message(&found);
+        assert!(message.contains("csrfprobe.wren"));
+        assert!(message.contains("delete"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

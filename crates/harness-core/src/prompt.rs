@@ -50,6 +50,23 @@ How to work:
 - Stop probing after three attempts. If an API is not in the docs, write the
   simplest version and let the compiler/test report the error. Do not burn the
   turn trying names: a concrete file and a failing test teach you more.
+- Wren/Bialet traps that otherwise cost whole turns (details in
+  `bialet-pitfalls.md`):
+  - Every method that produces a value needs an explicit `return`. Wren does
+    not return the last expression; a missing `return` yields null, and
+    `for (row in null)` crashes the process (SIGSEGV, empty reply).
+  - `toString`, `trim`, `count`, `keys` and `values` are getters: write
+    `val.toString`, never `val.toString()`.
+  - Never compare a Date to null with `date == null` (it calls `Date.==` and
+    crashes on `other.unix`). Use `if (!date)` or `if (null == date)`.
+  - A literal `%` in a Wren string is `\x25`; `"100%"` does not compile. In an
+    HTML template write `%` directly (or `&#37;`), never `\x25`.
+  - Query methods take at most three positional arguments; pass one List for
+    four or more (`fetch([a,b,c,d])`).
+  - `BIALET_CONFIG` has columns `(key, val)`; use `Config.set`, never a raw
+    `INSERT ... (key, value)`.
+  - Every file imports what it uses. A template that calls a domain helper
+    needs its own `import "/_app/domain" for Periods`.
 - Keep every tool argument small (well under 8 KB). Split a large file into a
   `write_file` followed by `edit_file` calls instead of one huge payload; an
   oversized payload can be cut off mid-JSON and the call will not run.
@@ -240,10 +257,12 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
          read a page (for example `datetime.md`, `reference.md`, `database.md`, \
          `forms.md`, `http-calls.md`, `file.md`, `configuration.md`, `security.md`, \
          `deployment.md`, `rest-api.md`, `usage.md`, `tests.md`, `template.md`), \
-         or `list=true` to see every page. `bialet-recipes.md` has verified \
-         answers for date arithmetic, money formatting, CSV downloads, `Util`/\
-         `Config`, and test hygiene. Prefer reading the docs over guessing API \
-         names with `bialet_run`.\n",
+         or `list=true` to see every page. `bialet-pitfalls.md` lists the \
+         Wren/Bialet traps (getters, missing `return`, null iteration, `%`, \
+         Query arity, imports). `bialet-recipes.md` has verified answers for \
+         date arithmetic, money formatting (including `1.234,50`), CSV \
+         downloads, `Util`/`Config`, and test hygiene. Prefer reading the docs \
+         over guessing API names with `bialet_run`.\n",
     );
     if let Some(docs) = &ctx.docs_dir {
         prompt.push_str(&format!(
@@ -347,6 +366,7 @@ mod tests {
         assert!(prompt.contains("tests.md"));
         assert!(prompt.contains("datetime.md"));
         assert!(prompt.contains("bialet-recipes.md"));
+        assert!(prompt.contains("bialet-pitfalls.md"));
         assert!(prompt.contains("Wren core references"));
     }
 

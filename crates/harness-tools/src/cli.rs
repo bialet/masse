@@ -13,6 +13,10 @@ pub struct CmdOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
+    /// Set when the process died from a signal (SIGSEGV, SIGKILL, ...).
+    /// `exit_code` is `None` in that case, which used to look like a silent
+    /// success to the model.
+    pub signal: Option<i32>,
     pub timed_out: bool,
     /// Populated when the process could not be spawned at all.
     pub error: Option<String>,
@@ -27,7 +31,10 @@ pub const MAX_AGENT_OUTPUT_BYTES: usize = 48 * 1024;
 
 impl CmdOutput {
     pub fn success(&self) -> bool {
-        self.error.is_none() && !self.timed_out && self.exit_code == Some(0)
+        self.error.is_none()
+            && !self.timed_out
+            && self.signal.is_none()
+            && self.exit_code == Some(0)
     }
 
     /// Render the structured result as the text handed back to the agent.
@@ -37,9 +44,13 @@ impl CmdOutput {
             out.push_str(&format!("error: {err}\n"));
             return out;
         }
-        match self.exit_code {
-            Some(code) => out.push_str(&format!("exit_code: {code}\n")),
-            None => out.push_str("exit_code: (none)\n"),
+        match (self.exit_code, self.signal) {
+            (Some(code), _) => out.push_str(&format!("exit_code: {code}\n")),
+            (None, Some(sig)) => out.push_str(&format!(
+                "exit_code: (none)\nsignal: {sig} ({})\n",
+                signal_name(sig)
+            )),
+            (None, None) => out.push_str("exit_code: (none)\n"),
         }
         if self.timed_out {
             out.push_str("timed_out: true\n");
@@ -59,6 +70,21 @@ impl CmdOutput {
             }
         }
         out
+    }
+}
+
+/// Human-readable name for the signals a tool process is likely to die from.
+/// `exit_code: (none)` alone is ambiguous; naming the signal tells the model
+/// whether it crashed (SIGSEGV) or was killed.
+fn signal_name(signal: i32) -> &'static str {
+    match signal {
+        2 => "SIGINT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        15 => "SIGTERM",
+        _ => "signal",
     }
 }
 
@@ -173,10 +199,18 @@ pub async fn run(spec: &CmdSpec, cwd: &Path, timeout: Duration) -> CmdOutput {
         Ok(Ok(status)) => {
             let stdout = out_task.await.unwrap_or_default();
             let stderr = err_task.await.unwrap_or_default();
+            #[cfg(unix)]
+            let signal = {
+                use std::os::unix::process::ExitStatusExt;
+                status.signal()
+            };
+            #[cfg(not(unix))]
+            let signal = None;
             CmdOutput {
                 stdout,
                 stderr,
                 exit_code: status.code(),
+                signal,
                 timed_out: false,
                 error: None,
             }
@@ -187,6 +221,7 @@ pub async fn run(spec: &CmdSpec, cwd: &Path, timeout: Duration) -> CmdOutput {
                 stdout: out_task.await.unwrap_or_default(),
                 stderr: err_task.await.unwrap_or_default(),
                 exit_code: None,
+                signal: None,
                 timed_out: false,
                 error: Some(format!("failed to wait for `{}`: {e}", spec.program)),
             }
@@ -210,6 +245,7 @@ pub async fn run(spec: &CmdSpec, cwd: &Path, timeout: Duration) -> CmdOutput {
                 stdout,
                 stderr,
                 exit_code: None,
+                signal: None,
                 timed_out: true,
                 error: None,
             }
@@ -273,6 +309,18 @@ mod tests {
         let capped = cap_bytes(&text, 101);
         assert!(capped.starts_with('ñ'));
         assert!(capped.ends_with('ñ'));
+    }
+
+    #[test]
+    fn a_signal_death_is_not_a_success() {
+        let out = CmdOutput {
+            signal: Some(11),
+            exit_code: None,
+            ..Default::default()
+        };
+        assert!(!out.success());
+        let text = out.to_agent_text();
+        assert!(text.contains("signal: 11 (SIGSEGV)"), "got: {text}");
     }
 
     #[test]

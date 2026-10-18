@@ -9,7 +9,7 @@ use serde_json::Value as Json;
 
 use crate::cli::{truncate_lines, CmdSpec};
 use crate::tool::{
-    opt_bool, opt_str, opt_u64, req_str, schema_object, Tool, ToolContext, ToolResult,
+    opt_bool, opt_str, opt_u64, req_str, schema_object, Tool, ToolContext, ToolResult, ToolStatus,
 };
 
 const DEFAULT_SERVER_KEY: &str = "bialet_server";
@@ -75,8 +75,38 @@ impl Tool for BialetRun {
         let out = ctx
             .run(&spec, ctx.timeout(opt_u64(&args, "timeout_secs")))
             .await;
-        ToolResult::from_cmd(&out)
+        bialet_run_result(&out)
     }
+}
+
+/// `bialet -r` prints `Compilation Error` / `Runtime Error` / `Stack Error` to
+/// stdout and still exits 0. Left alone, the model sees `exit_code: 0`, assumes
+/// the snippet worked and repeats the same probe; it also keeps the loop guards
+/// from counting the failures. Treat the markers as a failed run.
+fn bialet_run_result(out: &crate::cli::CmdOutput) -> ToolResult {
+    let mut result = ToolResult::from_cmd(out);
+    let hay = format!("{}\n{}", out.stdout, out.stderr);
+    let printed_error = ["Compilation Error", "Runtime Error", "Stack Error"]
+        .iter()
+        .any(|marker| hay.contains(marker));
+    if printed_error && result.status == ToolStatus::Ok {
+        result.status = ToolStatus::Error;
+        result.output.push_str(
+            "\n[masse] bialet printed a compilation/runtime error; this run failed even though the exit code was 0.\n",
+        );
+    }
+    if let Some(signal) = out.signal {
+        result.status = ToolStatus::Error;
+        let hint = if signal == 11 {
+            " A SIGSEGV from bialet usually means `for (x in null)` or a method without `return`; guard the value first."
+        } else {
+            ""
+        };
+        result.output.push_str(&format!(
+            "\n[masse] bialet crashed with signal {signal}.{hint}\n"
+        ));
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -788,5 +818,28 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bialet_run_errors_are_not_successes() {
+        let out = crate::cli::CmdOutput {
+            stdout: "2026-10-18 Compilation Error line 2 Error: Expect '(' after '%'.".into(),
+            exit_code: Some(0),
+            ..Default::default()
+        };
+        let result = bialet_run_result(&out);
+        assert_eq!(result.status, ToolStatus::Error);
+        assert!(result.output.contains("compilation/runtime error"));
+
+        let crashed = crate::cli::CmdOutput {
+            stdout: String::new(),
+            signal: Some(11),
+            exit_code: None,
+            ..Default::default()
+        };
+        let result = bialet_run_result(&crashed);
+        assert_eq!(result.status, ToolStatus::Error);
+        assert!(result.output.contains("SIGSEGV"));
+        assert!(result.output.contains("for (x in null)"));
     }
 }

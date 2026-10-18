@@ -3,7 +3,10 @@
 Short, runnable answers to the problems that cost the most round-trips in
 practice. Every snippet on this page was executed with `bialet -r` or against a
 running app. The complete Bialet manual lives in the pages listed by
-`bialet_docs list=true`; this page only fills the gaps between them.
+`bialet_docs list=true`; this page only fills the gaps between them. Read
+`bialet-pitfalls.md` as well: it lists the API traps that otherwise cost an
+entire turn (`toString` is a getter, a missing `return` returns null, iterating
+null crashes, a literal `%` is `\x25`, Query takes at most three arguments).
 
 ## Dates: add days, add months, week start, due dates
 
@@ -83,12 +86,24 @@ a helper; never do float arithmetic on pesos/dollars across many rows.
 
 ```wren
 class Money {
-  static cents(value) {
-    if (value == null) return 0
-    var n = value is Num ? value : Num.fromString("%(value)")
-    if (n == null) return 0
-    return (n * 100).round
+  // Accepts "1234.5", "1.234,50", "12,5", "19.99" and null.
+  static parse(text) {
+    if (text == null) return 0
+    var t = "%(text)".trim().replace(" ", "")
+    if (t == "") return 0
+    if (t.contains(",")) {
+      // Spanish format: dots are thousands, comma is the decimal separator.
+      t = t.replace(".", "").replace(",", ".")
+    } else if (t.contains(".")) {
+      var parts = t.split(".")
+      var last = parts[parts.count - 1]
+      // "1.234" is thousands; "19.99" is decimal.
+      if (parts.count == 2 && last.count == 3) t = t.replace(".", "")
+    }
+    return Num.fromString(t) || 0
   }
+
+  static cents(text) { (Money.parse(text) * 100).round }
 
   static fmt(cents) {
     var negative = cents < 0
@@ -102,7 +117,8 @@ class Money {
 
 ```wren
 Money.fmt(Money.cents("1234.567")) // 1234.57
-Money.fmt(Money.cents("12.5"))     // 12.50
+Money.fmt(Money.cents("1.234,50")) // 1234.50
+Money.fmt(Money.cents("12,5"))     // 12.50
 Money.cents("19.99")               // 1999 (store this INTEGER)
 Money.cents(null)                  // 0
 ```
