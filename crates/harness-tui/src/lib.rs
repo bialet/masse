@@ -35,8 +35,9 @@ pub struct TuiConfig {
     pub tool_count: usize,
     pub history: Vec<SessionEvent>,
     pub root: String,
-    /// Developer mode (`--debug`): show the full log. When false (the default),
-    /// only show what a non-developer needs.
+    /// Show the full log (the default). When false, the front end runs in user
+    /// mode: each turn collapses to the question the model asks or the final
+    /// summary.
     pub debug: bool,
 }
 

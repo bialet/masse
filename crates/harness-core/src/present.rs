@@ -1,11 +1,11 @@
-//! Presentation filter for the default, non-developer mode.
+//! Presentation filter for user mode.
 //!
-//! masse has two audiences. A developer running `--debug` wants the full log:
-//! every tool call, every result, every retry. Everyone else wants only what
-//! matters: their own messages, the *final* assistant message of each turn —
-//! which is either the question the model is asking or the summary it writes
-//! when it is done — errors, and the `finish` outcome. Tool traffic, retries,
-//! notices and the model's step-by-step narration are dropped.
+//! masse has two output modes. `--debug` (the default) shows the full log:
+//! every tool call, every result, every retry. User mode hides all of that and
+//! keeps only what matters: the user's own messages, the *final* assistant
+//! message of each turn — either the question the model is asking or the
+//! summary it writes when it is done — errors, and the `finish` outcome. Tool
+//! traffic, retries, notices and the model's step-by-step narration are dropped.
 //!
 //! [`UserModeFilter`] performs that collapse. It is deliberately front-end
 //! agnostic so the TUI and the server can share one definition of "relevant".
@@ -14,7 +14,7 @@ use harness_session::Event as SessionEvent;
 
 use crate::agent::AgentEvent;
 
-/// Something worth showing to a non-developer.
+/// Something worth showing to the user in user mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Shown {
     User(String),

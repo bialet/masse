@@ -24,13 +24,14 @@ cargo fmt --all
 
 ## Output modes
 
-The default front-end output is **user mode**: the model may only emit a
-question or the final summary, and the front ends hide tool traffic and
-intermediate narration. `--debug` shows everything. Keep that invariant when
-adding events: if an event is only useful to a developer, the front ends must
-not surface it in user mode. The shared logic lives in
-`harness_core::present::UserModeFilter` (TUI) and in the embedded page's script
-(server).
+The default front-end output is the **full log**: the model may emit any
+message, and tool traffic and intermediate narration are shown. `--debug` is the
+default and is kept so existing invocations keep working; `--user-mode`
+collapses each turn to the question the model asks or the final summary and
+hides everything else. Keep that invariant when adding events: if an event is
+only useful to a developer, the front ends must not surface it in user mode. The
+shared logic lives in `harness_core::present::UserModeFilter` (TUI) and in the
+embedded page's script (server).
 
 ## Documentation
 

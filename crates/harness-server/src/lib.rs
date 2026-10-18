@@ -60,7 +60,9 @@ pub struct AppState {
     pub root: String,
     /// Path to the human-readable runtime log, if logging is enabled.
     pub log_path: Option<PathBuf>,
-    /// Developer mode: the UI shows the full log. Off by default.
+    /// Whether the UI shows the full log (the default). When false, the UI runs
+    /// in user mode: each turn collapses to the question the model asks or the
+    /// final summary.
     pub debug: bool,
     /// Whether a turn is running and how the last one ended.
     pub turn: Arc<std::sync::Mutex<TurnState>>,
@@ -599,11 +601,11 @@ function renderAssistant(html) {
 }
 
 const DEBUG = document.documentElement.dataset.masseMode === 'debug';
-document.getElementById('mode').textContent = DEBUG ? '· debug' : '';
+document.getElementById('mode').textContent = DEBUG ? '' : '· user mode';
 
-// In user mode (the default) the assistant's last message of a turn is held
-// back and shown only when the turn ends, so step-by-step narration and tool
-// noise never appear. In debug mode everything is rendered as it arrives.
+// In user mode the assistant's last message of a turn is held back and shown
+// only when the turn ends, so step-by-step narration and tool noise never
+// appear. In debug mode (the default) everything is rendered as it arrives.
 let pending = null;
 
 // `pending` holds the rendered HTML of the assistant's last message.
@@ -612,8 +614,8 @@ function flushPending() {
 }
 
 // A turn can spend a long time running tools and still produce no text to show
-// (the default user mode hides tool traffic and step-by-step narration). The
-// header spinner plus a log line make it obvious that masse is still working.
+// (user mode hides tool traffic and step-by-step narration). The header spinner
+// plus a log line make it obvious that masse is still working.
 function setWorking(on) {
   sendEl.disabled = on;
   if (on) {

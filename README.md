@@ -22,22 +22,22 @@ If no front-end flag is given, `masse` starts the TUI.
 
 ## Output modes
 
-masse is built for people who are **not** developers. By default it runs in
-**user mode**: you see your own messages and, from the assistant, only the
-question it asks when it needs an answer and the plain-language explanation
-when it finishes. Tool calls, results, retries and the assistant's
-step-by-step narration are hidden — in both front ends.
+By default masse shows the **full log**: every tool call, every result, every
+retry and every intermediate message, plus provider/model/tools/session in the
+TUI status bar.
+
+Pass `--user-mode` to collapse each turn to the question the model asks when it
+needs an answer and the plain-language explanation when it finishes. Tool
+calls, results, retries and the assistant's step-by-step narration are hidden —
+in both front ends. The mode is fixed for the run and the TUI and server
+respect it. Whatever the mode, the complete transcript is always written to
+`.masse/session.csv`.
 
 Assistant messages are **Markdown**, and both front ends render it — headings,
 lists, fenced code, blockquotes, tables and inline emphasis, code and links —
 instead of printing the raw source. `harness-core` owns the parser; the TUI
 draws styled terminal lines and the server pre-renders the HTML the page
 injects.
-
-Pass `--debug` for the full developer log: every tool call, every result,
-every intermediate message, plus provider/model/tools/session in the status
-bar. The mode is fixed for the run and the TUI and server respect it. Whatever
-the mode, the complete transcript is always written to `.masse/session.csv`.
 
 ## Definition of done
 
@@ -233,7 +233,8 @@ file.
 | `--max-iterations` | — | `50` | Tool-call iterations per turn; on reaching the cap the agent asks for a final answer without tools |
 | `--no-auto-commit` | — | — | Disable the automatic git commit after every turn |
 | `--auto-push` | `MASSE_AUTO_PUSH` | — | After each auto-commit, run `git push origin HEAD` |
-| `--debug` | `MASSE_DEBUG` | — | Developer mode: show the full log (default is user mode) |
+| `--debug` | — | — | Show the full log (the default; kept for compatibility) |
+| `--user-mode` | `MASSE_USER_MODE` | — | Collapse each turn to the question and the final summary |
 | `--max-retries` | — | `3` | Retries per model call for transient errors (`0` disables) |
 | `--retry-delay-ms` | — | `800` | Base delay for the retry backoff |
 | `--temperature` | — | `0.2` | Sampling temperature |

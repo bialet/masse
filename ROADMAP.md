@@ -49,8 +49,8 @@ masse is exposed beyond loopback; then auth for `/api/*` and `/ws` (token +
 Enforce `requires_approval()` in the agent loop with an explicit policy
 decision for irreversible tools (`git_push`, `git_commit`, `delete_dir`,
 `sqlite_schema`). The prompt to the user must be **plain, calm and
-non-technical** — the primary audience is non-developers. Describe what will
-change in their app, not the tool name or SQL.
+non-technical**. Describe what will change in their app, not the tool name or
+SQL.
 
 ### 5. Git
 Split git by blast radius, mirroring the SQLite split:
@@ -89,7 +89,7 @@ does not clear the environment for child processes).
       Bialet's own `-m/-M/-c/-C` limits to `bialet_server_start`.
 
 ### P1
-- [ ] Enforce approvals with non-developer-friendly wording (finding 4).
+- [ ] Enforce approvals with plain-language wording (finding 4).
 - [ ] Split git and add `git_pull`; harden hooks; auto-push off (finding 5).
 - [ ] Server auth (token + Origin + size/rate limits) before any non-loopback
       exposure (finding 3).

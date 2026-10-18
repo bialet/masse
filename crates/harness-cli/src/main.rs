@@ -123,10 +123,16 @@ struct Cli {
     #[arg(long, env = "MASSE_AUTO_PUSH")]
     auto_push: bool,
 
-    /// Developer mode: show the full log (tool calls, results, retries). Off by
-    /// default, where only the messages a non-developer needs are shown.
-    #[arg(long, env = "MASSE_DEBUG")]
+    /// Show the full log (tool calls, results, retries, intermediate messages).
+    /// This is the default; the flag is accepted so existing invocations keep
+    /// working. Use `--user-mode` to collapse the output.
+    #[arg(long, conflicts_with = "user_mode")]
     debug: bool,
+
+    /// Collapse each turn to the question the model asks and its final summary,
+    /// hiding tool calls, results, retries and intermediate narration.
+    #[arg(long, env = "MASSE_USER_MODE")]
+    user_mode: bool,
 
     /// Sampling temperature.
     #[arg(long, default_value_t = 0.2)]
@@ -343,7 +349,7 @@ async fn run() -> Result<()> {
         ))
     };
 
-    let mut system_prompt = build_system_prompt(&project, cli.debug);
+    let mut system_prompt = build_system_prompt(&project, cli.show_full_log());
     if let Some(path) = &cli.prompt_file {
         let prompt_path = if path.is_absolute() {
             path.clone()
@@ -417,7 +423,7 @@ async fn run() -> Result<()> {
             tool_count: tool_names.len(),
             history,
             root: root.display().to_string(),
-            debug: cli.debug,
+            debug: cli.show_full_log(),
         };
         harness_tui::run(tui_config, handle.clone()).await
     } else {
@@ -440,7 +446,7 @@ async fn run() -> Result<()> {
             model: resolved.model.clone(),
             root: root.display().to_string(),
             log_path: Some(runtime_log.clone()),
-            debug: cli.debug,
+            debug: cli.show_full_log(),
             turn: Arc::new(std::sync::Mutex::new(harness_server::TurnState::default())),
         };
         harness_server::serve(state, addr).await
@@ -450,6 +456,14 @@ async fn run() -> Result<()> {
     processes.stop_all().await;
     handle.shutdown();
     result
+}
+
+impl Cli {
+    /// The full log is shown unless `--user-mode` was requested. `--debug` is
+    /// the default and is accepted so older invocations keep working.
+    fn show_full_log(&self) -> bool {
+        self.debug || !self.user_mode
+    }
 }
 
 fn print_config(
@@ -523,8 +537,8 @@ fn print_config(
     );
     println!(
         "mode           : {}",
-        if cli.debug {
-            "debug (full log)"
+        if cli.show_full_log() {
+            "full log (tool calls, results, retries)"
         } else {
             "user (questions and final summary only)"
         }
