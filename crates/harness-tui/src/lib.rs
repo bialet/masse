@@ -17,12 +17,12 @@ use harness_core::markdown::{self, Block as MdBlock, Inline};
 use harness_core::{
     format_cost, format_tokens, AgentEvent, AgentHandle, Shown, UsageReport, UserModeFilter,
 };
-use harness_session::Event as SessionEvent;
+use harness_session::{Event as SessionEvent, SessionInfo};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -34,6 +34,8 @@ pub struct TuiConfig {
     pub provider_name: String,
     pub model: String,
     pub session_path: String,
+    pub session_id: String,
+    pub session_title: String,
     pub tool_count: usize,
     pub history: Vec<SessionEvent>,
     pub root: String,
@@ -41,6 +43,12 @@ pub struct TuiConfig {
     /// mode: each turn collapses to the question the model asks or the final
     /// summary.
     pub debug: bool,
+}
+
+/// The session picker overlay (Ctrl-R).
+struct Picker {
+    items: Vec<SessionInfo>,
+    selected: usize,
 }
 
 struct App {
@@ -58,6 +66,10 @@ struct App {
     filter: UserModeFilter,
     /// Latest token/cost/context report, shown in the status bar.
     usage: UsageReport,
+    session_id: String,
+    session_title: String,
+    session_path: String,
+    picker: Option<Picker>,
 }
 
 impl App {
@@ -76,6 +88,10 @@ impl App {
             debug: config.debug,
             filter: UserModeFilter::new(),
             usage: UsageReport::default(),
+            session_id: config.session_id.clone(),
+            session_title: config.session_title.clone(),
+            session_path: config.session_path.clone(),
+            picker: None,
         };
         app.ingest_history(&config.history);
         app
@@ -138,7 +154,13 @@ impl App {
                 );
                 self.push_line(Span::styled(header, Style::default().fg(color)), &ev.output);
             }
-            "session_start" | "session_end" => {}
+            "context_compact" => {
+                self.push_plain(
+                    "── earlier history compacted (full log kept) ──",
+                    Color::DarkGray,
+                );
+            }
+            "session_start" | "session_end" | "session_title" => {}
             _ => {}
         }
     }
@@ -213,6 +235,27 @@ impl App {
     }
 
     fn on_agent_event(&mut self, event: AgentEvent) {
+        // A session switch replaces the whole transcript; nothing from the old
+        // conversation may leak into the new one.
+        if let AgentEvent::SessionChanged {
+            id,
+            title,
+            path,
+            events,
+        } = &event
+        {
+            self.lines.clear();
+            self.filter = UserModeFilter::new();
+            self.running = false;
+            self.status = "ready".into();
+            self.usage = UsageReport::default();
+            self.session_id = id.clone();
+            self.session_title = title.clone();
+            self.session_path = path.clone();
+            self.ingest_history(events);
+            self.scroll_back = 0;
+            return;
+        }
         if self.debug {
             self.push_developer_event(&event);
         } else if let Some(shown) = self.filter.on_agent(&event) {
@@ -310,6 +353,7 @@ impl App {
             AgentEvent::Usage(report) => {
                 self.push_plain(format!("• {}", usage_summary(report)), Color::DarkGray);
             }
+            AgentEvent::SessionChanged { .. } => {}
         }
     }
 
@@ -420,7 +464,7 @@ async fn run_loop<B: ratatui::backend::Backend>(
             maybe_event = key_rx.recv() => {
                 match maybe_event {
                     Some(Event::Key(key)) if key.kind != KeyEventKind::Release => {
-                        handle_key(&mut app, &handle, key);
+                        handle_key(&mut app, &handle, key).await;
                     }
                     Some(_) => {}
                     None => app.should_quit = true,
@@ -443,13 +487,26 @@ async fn run_loop<B: ratatui::backend::Backend>(
     Ok(())
 }
 
-fn handle_key(app: &mut App, handle: &AgentHandle, key: KeyEvent) {
+async fn handle_key(app: &mut App, handle: &AgentHandle, key: KeyEvent) {
+    // Quitting always works, even with the picker open.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
+    {
+        app.should_quit = true;
+        return;
+    }
+
+    if app.picker.is_some() {
+        picker_key(app, handle, key);
+        return;
+    }
+
     match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            new_session(app, handle).await;
         }
-        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.should_quit = true;
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            open_picker(app, handle).await;
         }
         KeyCode::Enter => app.submit(handle),
         KeyCode::Backspace => {
@@ -517,6 +574,60 @@ fn handle_key(app: &mut App, handle: &AgentHandle, key: KeyEvent) {
     }
 }
 
+/// Keys while the session picker is open.
+fn picker_key(app: &mut App, handle: &AgentHandle, key: KeyEvent) {
+    let Some(picker) = app.picker.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+        KeyCode::Down => {
+            picker.selected = (picker.selected + 1).min(picker.items.len().saturating_sub(1));
+        }
+        KeyCode::Enter => {
+            if let Some(info) = picker.items.get(picker.selected) {
+                let id = info.id.clone();
+                app.picker = None;
+                if !handle.switch_session(id) {
+                    app.push_plain("agent actor has stopped", Color::Red);
+                }
+            }
+        }
+        KeyCode::Esc => app.picker = None,
+        _ => {}
+    }
+}
+
+async fn open_picker(app: &mut App, handle: &AgentHandle) {
+    if app.running {
+        app.push_plain(
+            "wait for the turn to finish before switching sessions",
+            Color::Yellow,
+        );
+        return;
+    }
+    let items = handle.sessions().list().await;
+    app.picker = Some(Picker { items, selected: 0 });
+}
+
+async fn new_session(app: &mut App, handle: &AgentHandle) {
+    if app.running {
+        app.push_plain(
+            "wait for the turn to finish before creating a session",
+            Color::Yellow,
+        );
+        return;
+    }
+    match handle.sessions().create(None).await {
+        Ok(info) => {
+            if !handle.switch_session(info.id.clone()) {
+                app.push_plain("agent actor has stopped", Color::Red);
+            }
+        }
+        Err(error) => app.push_plain(format!("cannot create session: {error:#}"), Color::Red),
+    }
+}
+
 fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
     let area = frame.area();
 
@@ -554,10 +665,20 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
     let max_scroll = total_visual.saturating_sub(inner_height);
     let scroll = max_scroll.saturating_sub(app.scroll_back as usize) as u16;
 
-    let transcript_title = if app.debug {
-        format!(" masse · {} ", config.root)
+    let session_label = if app.session_title.is_empty() {
+        app.session_id.clone()
     } else {
-        " masse ".to_string()
+        format!("{} · {}", app.session_title, app.session_id)
+    };
+    let session_label = if session_label.is_empty() {
+        app.session_path.clone()
+    } else {
+        session_label
+    };
+    let transcript_title = if app.debug {
+        format!(" masse · {session_label} · {} ", config.root)
+    } else {
+        format!(" masse · {session_label} ")
     };
     let transcript = Paragraph::new(app.lines.clone())
         .block(
@@ -576,7 +697,7 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" message (Enter to send · Esc cancel · Ctrl-C quit) ")
+                .title(" message (Enter send · Ctrl-N new · Ctrl-R sessions · Esc cancel · Ctrl-C quit) ")
                 .border_style(Style::default().fg(Color::Blue)),
         )
         .wrap(Wrap { trim: false })
@@ -628,7 +749,7 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
             Style::default().fg(Color::DarkGray),
         ));
         status_spans.push(Span::styled(
-            format!("| {} ", config.session_path),
+            format!("| {} ", app.session_path),
             Style::default().fg(Color::DarkGray),
         ));
         status_spans.push(Span::styled(
@@ -637,6 +758,67 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(status_spans)), chunks[2]);
+
+    // Session picker: a small modal over the transcript.
+    if let Some(picker) = &app.picker {
+        draw_picker(frame, picker, area);
+    }
+}
+
+fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
+    let height = (picker.items.len() as u16 + 2)
+        .min(area.height.saturating_sub(4))
+        .max(3);
+    let width = area.width.saturating_sub(8).clamp(30, 90);
+    let rect = Rect {
+        x: (area.width.saturating_sub(width)) / 2,
+        y: (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, rect);
+
+    let visible = height.saturating_sub(2) as usize;
+    let start = if picker.selected >= visible {
+        picker.selected + 1 - visible
+    } else {
+        0
+    };
+    let mut lines = Vec::new();
+    for (index, info) in picker.items.iter().enumerate().skip(start).take(visible) {
+        let selected = index == picker.selected;
+        let title = if info.title.is_empty() {
+            "(untitled)"
+        } else {
+            info.title.as_str()
+        };
+        let marker = if selected { "▸" } else { " " };
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {title}  ·  {}", info.id),
+            style,
+        )));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no sessions yet: send a message to create one",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    let picker_box = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" sessions · Enter open · Esc cancel ")
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    frame.render_widget(picker_box, rect);
 }
 
 fn visual_lines(width: usize, inner: usize) -> usize {
@@ -996,5 +1178,31 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(app.usage.total.total_tokens, 500);
+    }
+
+    #[test]
+    fn switching_sessions_replaces_the_transcript_and_the_label() {
+        let mut app = app(true);
+        app.on_agent_event(AgentEvent::AssistantMessage("old conversation".into()));
+        assert!(transcript(&app).contains("old conversation"));
+
+        app.on_agent_event(AgentEvent::SessionChanged {
+            id: "new-id".into(),
+            title: "new work".into(),
+            path: "/tmp/new.csv".into(),
+            events: vec![SessionEvent {
+                event_type: "user_message".into(),
+                output: "fresh start".into(),
+                ..Default::default()
+            }],
+        });
+
+        let text = transcript(&app);
+        assert!(!text.contains("old conversation"), "{text}");
+        assert!(text.contains("fresh start"), "{text}");
+        assert_eq!(app.session_id, "new-id");
+        assert_eq!(app.session_title, "new work");
+        assert_eq!(app.session_path, "/tmp/new.csv");
+        assert!(!app.running);
     }
 }

@@ -15,10 +15,10 @@ use clap::parser::ValueSource;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use harness_core::{
     build_system_prompt, format_cost, format_tokens, Agent, AgentConfig, AgentEvent, AgentHandle,
-    MockProvider, OpenAiProvider, ProjectContext, Provider,
+    MockProvider, OpenAiProvider, ProjectContext, Provider, DEFAULT_COMPACT_AT_PERCENT,
 };
 use harness_server::AppState;
-use harness_session::SessionStore;
+use harness_session::SessionManager;
 use harness_tools::skill_tools::SkillTool;
 use harness_tools::{builtin_registry, ToolContext};
 use tokio::io::AsyncWriteExt;
@@ -42,9 +42,22 @@ struct Cli {
     #[arg(long, short = 'C', default_value = ".")]
     workspace: PathBuf,
 
-    /// Session file. Defaults to <workspace>/session.csv.
-    #[arg(long)]
+    /// Use one exact CSV instead of the managed sessions under `.masse/sessions/`.
+    #[arg(long, conflicts_with_all = ["new", "resume"])]
     session: Option<PathBuf>,
+
+    /// Start a new session instead of resuming the workspace's current one.
+    #[arg(long, conflicts_with = "resume")]
+    new: bool,
+
+    /// Resume a session by id, or `last` for the most recent one.
+    #[arg(long, value_name = "ID")]
+    resume: Option<String>,
+
+    /// Compact the model context at this percentage of the context window.
+    /// The full conversation is always kept in session.csv. 0 disables it.
+    #[arg(long, default_value_t = DEFAULT_COMPACT_AT_PERCENT, value_name = "PERCENT")]
+    compact_at: u64,
 
     /// Run the terminal UI (default).
     #[arg(long, conflicts_with = "serve")]
@@ -179,6 +192,38 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// List, create, rename or archive conversations.
+    Sessions {
+        #[command(subcommand)]
+        action: SessionsAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionsAction {
+    /// List sessions in this workspace, most recently active first.
+    List,
+    /// Create a session and make it the current one.
+    New {
+        /// Optional title; otherwise it is derived from the first message.
+        title: Option<String>,
+    },
+    /// Make an existing session current.
+    Open {
+        /// Session id, or `last`.
+        id: String,
+    },
+    /// Give a session a title (appended to its log).
+    Rename {
+        /// Session id, or `last`.
+        id: String,
+        title: String,
+    },
+    /// Move a session out of the picker. The log is kept, never deleted.
+    Archive {
+        /// Session id, or `last`.
+        id: String,
+    },
 }
 
 /// Provider settings after layering the config file, the environment and the
@@ -310,11 +355,34 @@ async fn run() -> Result<()> {
         bail!("workspace is not a directory: {}", root.display());
     }
 
-    let session_path = cli
-        .session
-        .clone()
-        .map(|p| if p.is_absolute() { p } else { root.join(p) })
-        .unwrap_or_else(|| root.join(".masse").join("session.csv"));
+    // `masse sessions …` only needs the workspace, not a provider.
+    if let Some(Command::Sessions { action }) = &cli.command {
+        if let Err(e) = harness_core::context::ensure_workspace_gitignore(&root).await {
+            eprintln!("[masse] warning: could not update .gitignore: {e}");
+        }
+        return run_sessions(&root, action).await;
+    }
+
+    // Named sessions live under `.masse/sessions/`; `--session` keeps the old
+    // escape hatch of pointing at an exact CSV.
+    let explicit = cli.session.as_ref().map(|path| {
+        if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        }
+    });
+    let sessions = SessionManager::load(&root, explicit)
+        .await
+        .context("opening the session store")?;
+    if cli.new {
+        let info = sessions.create(None).await?;
+        eprintln!("[masse] new session {}", info.id);
+    } else if let Some(selector) = cli.resume.as_deref() {
+        let info = sessions.open(selector).await?;
+        eprintln!("[masse] resumed session {}", info.id);
+    }
+    let session_path = sessions.active_path().await;
 
     // Project context: AGENTS.md, skills, docs.
     let project = ProjectContext::load(&root, cli.bialet_docs.clone()).await;
@@ -386,9 +454,10 @@ async fn run() -> Result<()> {
         system_prompt,
         price_input: cli.price_input,
         price_output: cli.price_output,
+        compact_at_percent: cli.compact_at,
     };
 
-    let session = Arc::new(SessionStore::new(session_path.clone()));
+    let session = sessions.active_store().await;
     let history = session.read_all().await?;
     let registry = Arc::new(registry);
 
@@ -397,11 +466,12 @@ async fn run() -> Result<()> {
             &cli,
             &resolved,
             &root,
-            &session_path,
             &runtime_log,
             &project,
             &tool_names,
-        );
+            &sessions,
+        )
+        .await;
         return Ok(());
     }
 
@@ -414,7 +484,7 @@ async fn run() -> Result<()> {
     )
     .await
     .context("initializing agent")?;
-    let handle = AgentHandle::spawn(agent);
+    let handle = AgentHandle::spawn(agent, sessions.clone());
 
     // Subscribe a durable logger to every event, independent of the front end.
     spawn_event_logger(handle.subscribe(), runtime_log.clone());
@@ -432,6 +502,12 @@ async fn run() -> Result<()> {
             provider_name: provider.name().to_string(),
             model: resolved.model.clone(),
             session_path: session_path.display().to_string(),
+            session_id: sessions.active_id().await,
+            session_title: sessions
+                .active_info()
+                .await
+                .map(|info| info.title)
+                .unwrap_or_default(),
             tool_count: tool_names.len(),
             history,
             root: root.display().to_string(),
@@ -452,7 +528,7 @@ async fn run() -> Result<()> {
         );
         let state = AppState {
             handle: handle.clone(),
-            session: session.clone(),
+            sessions: sessions.clone(),
             tools: registry.clone(),
             provider_name: provider.name().to_string(),
             model: resolved.model.clone(),
@@ -478,17 +554,23 @@ impl Cli {
     }
 }
 
-fn print_config(
+async fn print_config(
     cli: &Cli,
     resolved: &Resolved,
     root: &std::path::Path,
-    session_path: &std::path::Path,
     runtime_log: &std::path::Path,
     project: &ProjectContext,
     tool_names: &[String],
+    sessions: &SessionManager,
 ) {
     println!("workspace      : {}", root.display());
-    println!("session        : {}", session_path.display());
+    println!(
+        "session        : {} ({})",
+        sessions.active_id().await,
+        sessions.active_path().await.display()
+    );
+    println!("sessions dir   : {}", sessions.dir().display());
+    println!("compact at     : {}%", cli.compact_at);
     println!("runtime log    : {}", runtime_log.display());
     let front = if cli.serve { "serve" } else { "tui" };
     println!("front end      : {front}");
@@ -595,6 +677,74 @@ fn print_config(
     }
 }
 
+/// `masse sessions …`: workspace-scoped session maintenance, no provider.
+async fn run_sessions(root: &Path, action: &SessionsAction) -> Result<()> {
+    let sessions = SessionManager::load(root, None).await?;
+    match action {
+        SessionsAction::List => {
+            let active = sessions.active_id().await;
+            let list = sessions.list().await;
+            if list.is_empty() {
+                println!(
+                    "no sessions yet in {} (the first message creates one)",
+                    sessions.dir().display()
+                );
+                return Ok(());
+            }
+            for info in list {
+                let mark = if info.id == active { "*" } else { " " };
+                let title = if info.title.is_empty() {
+                    "(untitled)"
+                } else {
+                    info.title.as_str()
+                };
+                println!(
+                    "{mark} {:<34} {:>5} events  {:<24} {}",
+                    info.id, info.events, info.updated, title
+                );
+            }
+            println!(
+                "\n* = current session; every log stays under {}",
+                sessions.dir().display()
+            );
+        }
+        SessionsAction::New { title } => {
+            let info = sessions.create(title.as_deref()).await?;
+            println!("{}", info.id);
+        }
+        SessionsAction::Open { id } => {
+            let info = sessions.open(id).await?;
+            println!("{} {}", info.id, info.path.display());
+        }
+        SessionsAction::Rename { id, title } => {
+            let info = sessions
+                .rename(&resolve_session_id(&sessions, id).await?, title)
+                .await?;
+            println!("renamed {} to {:?}", info.id, info.title);
+        }
+        SessionsAction::Archive { id } => {
+            let dest = sessions
+                .archive(&resolve_session_id(&sessions, id).await?)
+                .await?;
+            println!("archived to {}", dest.display());
+        }
+    }
+    Ok(())
+}
+
+/// `last` for rename/archive without changing which session is active.
+async fn resolve_session_id(sessions: &SessionManager, id: &str) -> Result<String> {
+    if id != "last" {
+        return Ok(id.to_string());
+    }
+    sessions
+        .list()
+        .await
+        .first()
+        .map(|info| info.id.clone())
+        .context("there are no sessions yet")
+}
+
 /// Append every agent event to a human-readable runtime log, independently of
 /// the front end. This is where provider errors and retries are recorded, so
 /// there is always somewhere to look when a turn fails.
@@ -677,5 +827,10 @@ fn format_event(event: &AgentEvent) -> String {
         }
         AgentEvent::Error(message) => format!("{ts} ERROR      {message}\n"),
         AgentEvent::TurnFinished => format!("{ts} TURN_FINISHED\n"),
+        AgentEvent::SessionChanged {
+            id, title, path, ..
+        } => {
+            format!("{ts} SESSION    id={id} title={title:?} path={path}\n")
+        }
     }
 }

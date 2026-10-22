@@ -29,10 +29,15 @@ pub const COLUMNS: [&str; 8] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventType {
     SessionStart,
+    /// A user (or command) given title for the session. The last one wins.
+    SessionTitle,
     UserMessage,
     AssistantMessage,
     ToolCall,
     ToolResult,
+    /// A compacted summary of everything before it. Replay starts here, while
+    /// the full raw log stays on disk for debugging and abuse review.
+    ContextCompact,
     SessionEnd,
 }
 
@@ -40,10 +45,12 @@ impl EventType {
     pub fn as_str(self) -> &'static str {
         match self {
             EventType::SessionStart => "session_start",
+            EventType::SessionTitle => "session_title",
             EventType::UserMessage => "user_message",
             EventType::AssistantMessage => "assistant_message",
             EventType::ToolCall => "tool_call",
             EventType::ToolResult => "tool_result",
+            EventType::ContextCompact => "context_compact",
             EventType::SessionEnd => "session_end",
         }
     }
@@ -51,10 +58,12 @@ impl EventType {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "session_start" => EventType::SessionStart,
+            "session_title" => EventType::SessionTitle,
             "user_message" => EventType::UserMessage,
             "assistant_message" => EventType::AssistantMessage,
             "tool_call" => EventType::ToolCall,
             "tool_result" => EventType::ToolResult,
+            "context_compact" => EventType::ContextCompact,
             "session_end" => EventType::SessionEnd,
             _ => return None,
         })
@@ -126,6 +135,31 @@ impl Event {
         }
     }
 
+    /// An explicit session title. Appended, never rewriting the previous one,
+    /// so the log remains a complete record.
+    pub fn session_title(title: &str) -> Self {
+        Event {
+            role: "system".into(),
+            output: title.to_string(),
+            ..Self::blank(EventType::SessionTitle)
+        }
+    }
+
+    /// A compacted summary of the conversation so far.
+    ///
+    /// `method` is `model` when the provider wrote the summary and
+    /// `heuristic` when compaction fell back to a deterministic digest.
+    /// `covered_events` is the length of the log at compaction time, which
+    /// makes later audits able to tell exactly what the summary replaced.
+    pub fn context_compact(summary: &str, method: &str, covered_events: usize) -> Self {
+        Event {
+            role: "system".into(),
+            args: format!("method={method}|covered_events={covered_events}"),
+            output: summary.to_string(),
+            ..Self::blank(EventType::ContextCompact)
+        }
+    }
+
     pub fn assistant_message(text: &str) -> Self {
         Event {
             role: "assistant".into(),
@@ -191,6 +225,10 @@ impl Event {
     /// Rebuild an event from a parsed CSV record.
     pub fn from_record(rec: &[String]) -> Option<Self> {
         if rec.len() != COLUMNS.len() {
+            return None;
+        }
+        // Tolerate a copied header line: it is documentation, not an event.
+        if rec[1] == COLUMNS[1] {
             return None;
         }
         Some(Event {
@@ -323,5 +361,11 @@ mod tests {
         assert_eq!(back.tool, "curl");
         assert_eq!(back.output, "a,b\nc");
         assert_eq!(back.exit_code_value(), Some(0));
+    }
+
+    #[test]
+    fn a_copied_header_row_is_not_an_event() {
+        let header: Vec<String> = COLUMNS.iter().map(|c| c.to_string()).collect();
+        assert!(Event::from_record(&header).is_none());
     }
 }

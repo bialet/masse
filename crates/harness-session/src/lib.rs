@@ -7,7 +7,9 @@
 
 pub mod csv;
 pub mod event;
+pub mod manager;
 pub mod store;
 
 pub use event::{decode_args, encode_args, encode_json_args, Event, EventType, Status};
+pub use manager::{SessionInfo, SessionManager};
 pub use store::SessionStore;

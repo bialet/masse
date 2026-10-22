@@ -11,7 +11,9 @@ pub mod prompt;
 pub mod provider;
 pub mod usage;
 
-pub use agent::{rebuild_messages, Agent, AgentConfig, AgentEvent, AgentHandle};
+pub use agent::{
+    rebuild_messages, Agent, AgentConfig, AgentEvent, AgentHandle, DEFAULT_COMPACT_AT_PERCENT,
+};
 pub use context::ProjectContext;
 pub use error::{CoreError, Result};
 pub use markdown::{Block, Inline};

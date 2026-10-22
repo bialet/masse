@@ -1,7 +1,7 @@
 # masse Development Guide
 
 masse is an AI coding harness in Rust with two front ends (TUI and
-HTTP/WebSocket server) sharing one `session.csv`.
+HTTP/WebSocket server) sharing one active session log.
 
 ## Layout
 
@@ -57,8 +57,14 @@ embedded page's script (server).
 - Use `tokio::fs` for file operations.
 - Validate every path against the project root before use (`harness_tools::path`).
 - Keep session persistence append-only and JSON-free.
-- `event_type ∈ {session_start, user_message, assistant_message, tool_call,
-  tool_result, session_end}` and `status ∈ {ok, error}`.
+- `event_type ∈ {session_start, session_title, user_message, assistant_message,
+  tool_call, tool_result, context_compact, session_end}` and
+  `status ∈ {ok, error}`.
+- A `context_compact` row replaces only the *model context* when replaying; the
+  raw events before it stay in the CSV forever (debugging and abuse review).
+  Never delete or rewrite a session log: `masse sessions archive` only moves it.
+- Sessions live under `.masse/sessions/<id>/session.csv`; `.masse/current` is
+  the only pointer and `SessionManager` owns it.
 - A `.wren` change is not done until syntax is checked and `bialet_test` is
   green. The agent loop nudges once for syntax (`VALIDATE_BEFORE_FINISH`) and
   once for the test run (`VERIFY_BEFORE_FINISH`) when the model tries to finish

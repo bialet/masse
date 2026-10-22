@@ -21,7 +21,7 @@ use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use harness_core::markdown;
 use harness_core::{AgentEvent, AgentHandle};
-use harness_session::{Event as SessionEvent, SessionStore};
+use harness_session::{Event as SessionEvent, SessionManager};
 use harness_tools::ToolRegistry;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::broadcast::error::RecvError;
@@ -53,7 +53,7 @@ impl Default for TurnState {
 #[derive(Clone)]
 pub struct AppState {
     pub handle: AgentHandle,
-    pub session: Arc<SessionStore>,
+    pub sessions: Arc<SessionManager>,
     pub tools: Arc<ToolRegistry>,
     pub provider_name: String,
     pub model: String,
@@ -75,6 +75,9 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
         .route("/api/health", get(health))
         .route("/api/tools", get(list_tools))
         .route("/api/session", get(session_events))
+        .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/sessions/activate", post(activate_session))
+        .route("/api/sessions/rename", post(rename_session))
         .route("/api/log", get(log_tail))
         .route("/api/message", post(post_message))
         .route(
@@ -183,7 +186,9 @@ async fn list_tools(State(state): State<AppState>) -> Json<JsonValue> {
 }
 
 async fn session_events(State(state): State<AppState>) -> Json<JsonValue> {
-    let events = state.session.read_all().await.unwrap_or_default();
+    let store = state.sessions.active_store().await;
+    let events = store.read_all().await.unwrap_or_default();
+    let info = state.sessions.active_info().await.ok();
     // The most recent `finish` tool result tells whether the task completed.
     let finished = events
         .iter()
@@ -192,7 +197,9 @@ async fn session_events(State(state): State<AppState>) -> Json<JsonValue> {
         .map(|e| e.status == "ok");
     let turn = state.turn.lock().map(|t| t.clone()).unwrap_or_default();
     Json(json!({
-        "session": state.session.path().display().to_string(),
+        "session": store.path().display().to_string(),
+        "id": state.sessions.active_id().await,
+        "title": info.map(|i| i.title).unwrap_or_default(),
         "finished": finished,
         "turn": {
             "state": if turn.running { "running" } else { "idle" },
@@ -201,6 +208,113 @@ async fn session_events(State(state): State<AppState>) -> Json<JsonValue> {
         },
         "events": events.iter().map(session_event_json).collect::<Vec<_>>(),
     }))
+}
+
+fn session_info_json(info: &harness_session::SessionInfo) -> JsonValue {
+    json!({
+        "id": info.id,
+        "title": info.title,
+        "created": info.created,
+        "updated": info.updated,
+        "events": info.events,
+        "path": info.path.display().to_string(),
+    })
+}
+
+async fn list_sessions(State(state): State<AppState>) -> Json<JsonValue> {
+    let sessions = state.sessions.list().await;
+    Json(json!({
+        "active": state.sessions.active_id().await,
+        "dir": state.sessions.dir().display().to_string(),
+        "sessions": sessions.iter().map(session_info_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// Create a fresh session and switch the agent to it.
+fn turn_is_running(state: &AppState) -> bool {
+    state.turn.lock().map(|turn| turn.running).unwrap_or(false)
+}
+
+async fn create_session(State(state): State<AppState>, body: Option<Json<JsonValue>>) -> Response {
+    if turn_is_running(&state) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "finish the current turn before switching sessions" })),
+        )
+            .into_response();
+    }
+    let title = body
+        .as_ref()
+        .and_then(|Json(value)| value.get("title"))
+        .and_then(|value| value.as_str());
+    match state.sessions.create(title).await {
+        Ok(info) => {
+            if !state.handle.switch_session(info.id.clone()) {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "agent actor stopped" })),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::CREATED,
+                Json(json!({ "session": session_info_json(&info) })),
+            )
+                .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{error:#}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// Switch to an existing session. The WebSocket announces the new transcript.
+async fn activate_session(State(state): State<AppState>, Json(body): Json<JsonValue>) -> Response {
+    if turn_is_running(&state) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "finish the current turn before switching sessions" })),
+        )
+            .into_response();
+    }
+    let Some(id) = body.get("id").and_then(|value| value.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing `id`" })),
+        )
+            .into_response();
+    };
+    if !state.handle.switch_session(id) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "agent actor stopped" })),
+        )
+            .into_response();
+    }
+    (StatusCode::ACCEPTED, Json(json!({ "status": "switching" }))).into_response()
+}
+
+async fn rename_session(State(state): State<AppState>, Json(body): Json<JsonValue>) -> Response {
+    let (Some(id), Some(title)) = (
+        body.get("id").and_then(|value| value.as_str()),
+        body.get("title").and_then(|value| value.as_str()),
+    ) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "`id` and `title` are required" })),
+        )
+            .into_response();
+    };
+    match state.sessions.rename(id, title).await {
+        Ok(info) => Json(json!({ "session": session_info_json(&info) })).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{error:#}") })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -373,10 +487,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     keepalive.tick().await;
 
     // Replay history first so a late client sees the whole session.
-    if let Ok(history) = state.session.read_all().await {
+    let store = state.sessions.active_store().await;
+    if let Ok(history) = store.read_all().await {
         let payload = json!({
             "type": "history",
-            "session": state.session.path().display().to_string(),
+            "session": store.path().display().to_string(),
+            "id": state.sessions.active_id().await,
             "events": history.iter().map(session_event_json).collect::<Vec<_>>(),
         });
         if sender
@@ -509,6 +625,18 @@ fn agent_event_json(ev: &AgentEvent) -> JsonValue {
         }),
         AgentEvent::Error(message) => json!({ "kind": "error", "message": message }),
         AgentEvent::TurnFinished => json!({ "kind": "turn_finished" }),
+        AgentEvent::SessionChanged {
+            id,
+            title,
+            path,
+            events,
+        } => json!({
+            "kind": "session_changed",
+            "id": id,
+            "title": title,
+            "path": path,
+            "events": events.iter().map(session_event_json).collect::<Vec<_>>(),
+        }),
     }
 }
 
@@ -557,10 +685,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
           padding: 8px 10px; border-radius: 6px; }
   button { background: #2d6cdf; color: white; border: 0; padding: 8px 16px; border-radius: 6px; cursor: pointer; }
   button:disabled { background: #333; cursor: default; }
+  header select { background: #1a1a22; border: 1px solid #2a2a33; color: #e6e6e6;
+                  padding: 2px 6px; border-radius: 5px; max-width: 34ch; }
+  header button { padding: 2px 8px; font-size: 12px; }
 </style>
 </head>
 <body>
-<header>masse · <span id="spinner" hidden>⠋</span> <span id="status">connecting…</span> <span id="mode"></span> <span id="usage"></span></header>
+<header>masse ·
+  <select id="sessions" title="Session"></select>
+  <button id="newSession" type="button" title="New session">+ new</button>
+  <span id="spinner" hidden>⠋</span> <span id="status">connecting…</span> <span id="mode"></span> <span id="usage"></span></header>
 <div id="log"></div>
 <footer>
   <button id="attach" type="button" title="Attach a spreadsheet">Attach</button>
@@ -575,6 +709,8 @@ const usageEl = document.getElementById('usage');
 const inputEl = document.getElementById('msg');
 const sendEl = document.getElementById('send');
 const spinnerEl = document.getElementById('spinner');
+const sessionsEl = document.getElementById('sessions');
+const newSessionEl = document.getElementById('newSession');
 let ws;
 let reconnectDelay = 1000;
 let queued = '';
@@ -660,6 +796,8 @@ function renderSessionEvent(ev) {
   else if (ev.event_type === 'tool_call') append('tool', '  ⚙ ' + ev.tool + ' ' + ev.args);
   else if (ev.event_type === 'tool_result')
     append('result', '  ' + (ev.status === 'ok' ? '✔' : '✘') + ' ' + ev.tool + '\n' + ev.output);
+  else if (ev.event_type === 'context_compact')
+    append('result', '  ── earlier history compacted (full log kept) ──');
 }
 
 function renderHistoryEvent(ev) {
@@ -673,6 +811,17 @@ function renderHistoryEvent(ev) {
 }
 
 function renderLiveEvent(ev) {
+  if (ev.kind === 'session_changed') {
+    logEl.innerHTML = '';
+    pending = null;
+    turnHadOutput = false;
+    setWorking(false);
+    (ev.events || []).forEach(renderHistoryEvent);
+    flushPending();
+    loadSessions();
+    statusEl.textContent = 'connected';
+    return;
+  }
   if (ev.kind === 'assistant_message') {
     if (DEBUG) renderAssistant(ev.html);
     else if (ev.text.trim()) pending = ev.html;
@@ -737,6 +886,49 @@ function renderUsage(ev) {
   usageEl.textContent = '· ' + parts.join(' · ');
 }
 
+// --- Sessions -------------------------------------------------------------
+// The dropdown is the whole session UI: pick one to resume it, or create a
+// fresh one. The server broadcasts `session_changed` with the new transcript.
+async function loadSessions() {
+  try {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) return;
+    const data = await res.json();
+    sessionsEl.innerHTML = '';
+    (data.sessions || []).forEach((s) => {
+      const option = document.createElement('option');
+      option.value = s.id;
+      option.textContent = (s.title || s.id) + ' · ' + s.id;
+      if (s.id === data.active) option.selected = true;
+      sessionsEl.appendChild(option);
+    });
+    if (!sessionsEl.options.length) {
+      const option = document.createElement('option');
+      option.value = data.active || '';
+      option.textContent = 'new session';
+      sessionsEl.appendChild(option);
+    }
+  } catch (_) {}
+}
+
+sessionsEl.onchange = async () => {
+  statusEl.textContent = 'switching…';
+  await fetch('/api/sessions/activate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: sessionsEl.value }),
+  }).catch(() => {});
+};
+
+newSessionEl.onclick = async () => {
+  statusEl.textContent = 'creating…';
+  await fetch('/api/sessions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }).catch(() => {});
+};
+
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => {
@@ -747,6 +939,7 @@ function connect() {
     pending = null;
     turnHadOutput = false;
     setWorking(false);
+    loadSessions();
     if (queued !== null && queued !== '') {
       const text = queued;
       queued = '';
@@ -922,5 +1115,32 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"spinner\""));
         assert!(INDEX_HTML.contains("setWorking"));
         assert!(INDEX_HTML.contains("trabajando"));
+    }
+
+    #[test]
+    fn page_ships_the_session_picker() {
+        assert!(INDEX_HTML.contains("id=\"sessions\""));
+        assert!(INDEX_HTML.contains("newSession"));
+        assert!(INDEX_HTML.contains("session_changed"));
+        assert!(INDEX_HTML.contains("/api/sessions/activate"));
+    }
+
+    #[test]
+    fn session_changed_events_carry_the_new_transcript() {
+        let event = AgentEvent::SessionChanged {
+            id: "20261022-120000-0000".into(),
+            title: "guestbook".into(),
+            path: "/tmp/guestbook.csv".into(),
+            events: vec![SessionEvent {
+                event_type: "user_message".into(),
+                output: "hola".into(),
+                ..Default::default()
+            }],
+        };
+        let value = agent_event_json(&event);
+        assert_eq!(value["kind"], "session_changed");
+        assert_eq!(value["id"], "20261022-120000-0000");
+        assert_eq!(value["title"], "guestbook");
+        assert_eq!(value["events"][0]["output"], "hola");
     }
 }

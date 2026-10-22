@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::FutureExt;
-use harness_session::{encode_json_args, Event, SessionStore, Status as SessionStatus};
+use harness_session::{
+    encode_json_args, Event, SessionManager, SessionStore, Status as SessionStatus,
+};
 use harness_tools::cli::{cap_bytes, run as run_cmd, CmdSpec};
 use harness_tools::{ToolContext, ToolRegistry, ToolResult, ToolStatus};
 use tokio::sync::{broadcast, mpsc};
@@ -36,6 +38,9 @@ pub struct AgentConfig {
     pub price_input: Option<f64>,
     /// Override the built-in price for completion tokens, in USD per million.
     pub price_output: Option<f64>,
+    /// Compact the context when it reaches this percentage of the model's
+    /// window. `0` disables compaction. The raw session log is never touched.
+    pub compact_at_percent: u64,
 }
 
 impl Default for AgentConfig {
@@ -51,6 +56,7 @@ impl Default for AgentConfig {
             system_prompt: String::new(),
             price_input: None,
             price_output: None,
+            compact_at_percent: DEFAULT_COMPACT_AT_PERCENT,
         }
     }
 }
@@ -124,6 +130,31 @@ const MAX_TOOL_ARGS_BYTES: usize = 64 * 1024;
 /// Ceiling for any single tool output before it enters the transcript. A test
 /// that prints a whole table can otherwise overflow the context window.
 const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
+
+// --- Context compaction -----------------------------------------------------
+//
+// The full conversation stays in `session.csv` forever. Only the *context sent
+// to the model* is replaced, by a `context_compact` event that records the
+// summary and how many raw events it covers.
+
+/// Default percentage of the context window that triggers compaction.
+pub const DEFAULT_COMPACT_AT_PERCENT: u64 = 70;
+/// Assumed window when the model is not in the pricing table.
+const COMPACT_FALLBACK_WINDOW: u64 = 128_000;
+/// Never compact a conversation this short, even if the threshold is tiny.
+const COMPACT_MIN_MESSAGES: usize = 6;
+/// Ceiling for the digest handed to the summarizer, so compaction itself
+/// cannot overflow the window.
+const COMPACT_DIGEST_CHARS: usize = 48_000;
+/// Ceiling for the deterministic fallback summary.
+const COMPACT_FALLBACK_CHARS: usize = 8_000;
+/// Text prefix used when the compacted summary is replayed as a user message.
+const COMPACTED_PREFIX: &str = "[Earlier conversation, compacted to save context]";
+
+const COMPACT_PROMPT: &str = "You compress a coding conversation so it can continue in a smaller context window. \
+Write a compact factual summary for the assistant that will continue the work. Keep: the user's goals and decisions, \
+files created or changed, commands and their outcomes, the current state, open bugs, and the next step. Drop greetings, \
+repetition and raw tool output. Never invent progress. Answer with the summary only, in at most 30 lines.";
 
 /// The same call shape (arguments with numbers normalized) this many times in
 /// one turn means the model is probing, not working.
@@ -528,6 +559,14 @@ pub enum AgentEvent {
     Error(String),
     /// The model stopped on its own without calling `finish`.
     TurnFinished,
+    /// The active session changed. Carries the new transcript so each front
+    /// end can reset without a second read.
+    SessionChanged {
+        id: String,
+        title: String,
+        path: String,
+        events: Vec<Event>,
+    },
 }
 
 /// Owns the conversation state and drives the provider/tool loop.
@@ -559,9 +598,6 @@ impl Agent {
         config: AgentConfig,
     ) -> Result<Self> {
         let events = session.read_all().await?;
-        if events.is_empty() {
-            session.append(&Event::session_start()).await?;
-        }
         let mut messages = rebuild_messages(&events, &config.system_prompt);
         if messages.is_empty() {
             messages.push(ChatMessage::system(config.system_prompt.clone()));
@@ -578,6 +614,129 @@ impl Agent {
             context_tokens: 0,
             turn_usage: TokenUsage::default(),
         })
+    }
+
+    /// Switch to another session log and rehydrate its transcript.
+    ///
+    /// Only call this between turns: swapping the store mid-turn would record
+    /// tool events in the wrong conversation. Returns the replayed events so
+    /// the front end can render the new session without reading it again.
+    pub async fn switch_session(&mut self, session: Arc<SessionStore>) -> Result<Vec<Event>> {
+        let events = session.read_all().await?;
+        self.session = session;
+        self.messages = rebuild_messages(&events, &self.config.system_prompt);
+        self.repo_ready = None;
+        self.usage_total = TokenUsage::default();
+        self.context_tokens = 0;
+        self.turn_usage = TokenUsage::default();
+        Ok(events)
+    }
+
+    /// The context budget at which compaction runs, or `None` when disabled.
+    fn compact_limit(&self) -> Option<u64> {
+        if self.config.compact_at_percent == 0 {
+            return None;
+        }
+        let window = context_window_for(&self.config.model).unwrap_or(COMPACT_FALLBACK_WINDOW);
+        Some((window as u128 * self.config.compact_at_percent.min(100) as u128 / 100) as u64)
+    }
+
+    /// Rough size of the next request, in tokens. Providers report the real
+    /// count after a completion; this estimate is what catches a resumed
+    /// session before the first call.
+    fn estimated_context_tokens(&self) -> u64 {
+        let chars: usize = self
+            .messages
+            .iter()
+            .map(|message| {
+                message.content.chars().count()
+                    + message
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.arguments.chars().count())
+                        .sum::<usize>()
+            })
+            .sum();
+        (chars / 4) as u64
+    }
+
+    /// Whether the next turn should compact before it starts.
+    pub fn needs_compaction(&self) -> bool {
+        let Some(limit) = self.compact_limit() else {
+            return false;
+        };
+        if self.messages.len() < COMPACT_MIN_MESSAGES {
+            return false;
+        }
+        self.context_tokens.max(self.estimated_context_tokens()) >= limit
+    }
+
+    /// Replace the provider context with a summary, keeping the full log.
+    ///
+    /// Runs at the start of a turn, never inside one, and appends a
+    /// `context_compact` event before the new user message. `rebuild_messages`
+    /// replays from that event, so a restart sees exactly what the model saw.
+    async fn maybe_compact(&mut self, sink: Option<&broadcast::Sender<AgentEvent>>) -> Result<()> {
+        if !self.needs_compaction() {
+            return Ok(());
+        }
+        let events = self.session.read_all().await?;
+        if events.is_empty() {
+            return Ok(());
+        }
+        let last = events
+            .iter()
+            .rposition(|event| event.kind() == Some(harness_session::EventType::ContextCompact));
+        let digest = compact_digest(&events, last, COMPACT_DIGEST_CHARS);
+        if digest.trim().is_empty() {
+            return Ok(());
+        }
+
+        let (summary, method) = match self.summarize(&digest).await {
+            Ok(summary) if !summary.trim().is_empty() => (summary, "model"),
+            Ok(_) => (heuristic_summary(&digest), "heuristic"),
+            Err(error) => {
+                if let Some(sink) = sink {
+                    let _ = sink.send(AgentEvent::Notice(format!(
+                        "could not summarize the history ({error}); using a compact digest"
+                    )));
+                }
+                (heuristic_summary(&digest), "heuristic")
+            }
+        };
+
+        self.session
+            .append(&Event::context_compact(&summary, method, events.len()))
+            .await?;
+        self.messages = vec![
+            ChatMessage::system(self.config.system_prompt.clone()),
+            ChatMessage::user(format!("{COMPACTED_PREFIX}\n{summary}")),
+        ];
+        self.context_tokens = 0;
+
+        if let Some(sink) = sink {
+            let _ = sink.send(AgentEvent::Notice(format!(
+                "history compacted ({method}); the full log stays in {}",
+                self.session.path().display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Ask the provider for a summary of the bounded digest.
+    async fn summarize(&mut self, digest: &str) -> Result<String> {
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages: vec![
+                ChatMessage::system(COMPACT_PROMPT),
+                ChatMessage::user(digest),
+            ],
+            tools: Vec::new(),
+            temperature: 0.1,
+        };
+        let response = self.provider.complete(request).await?;
+        self.record_usage(response.usage);
+        Ok(response.content)
     }
 
     /// Run a git command in the workspace root.
@@ -785,10 +944,20 @@ impl Agent {
             };
         }
 
+        // A fresh turn starts the accounting for compaction and usage. Compact
+        // *before* recording the user message so the summary covers only the
+        // history that comes before it.
+        self.turn_usage = TokenUsage::default();
+        self.maybe_compact(sink).await?;
+
+        // Sessions are created lazily: the first event materializes the log.
+        if self.session.is_empty().await {
+            self.session.append(&Event::session_start()).await?;
+        }
+
         emit!(AgentEvent::UserMessage(text.to_string()));
         self.session.append(&Event::user_message(text)).await?;
         self.messages.push(ChatMessage::user(text));
-        self.turn_usage = TokenUsage::default();
 
         // Definition-of-done tracking: did we change Wren code since the last
         // green test run, and have we already nudged once this turn?
@@ -1305,12 +1474,31 @@ impl Agent {
 
 /// Reconstruct a provider-ready conversation from session events.
 ///
+/// Replay starts at the **last** `context_compact` event: everything older is
+/// represented by that summary. The raw events stay in the CSV for debugging;
+/// only the context sent to the model is rewound.
+///
 /// The CSV does not store OpenAI `tool_call_id`s, so tool results are replayed
 /// as user-role notes. This keeps the transcript valid without losing content.
 pub fn rebuild_messages(events: &[Event], system_prompt: &str) -> Vec<ChatMessage> {
     let mut messages = vec![ChatMessage::system(system_prompt)];
+    let start = match events
+        .iter()
+        .rposition(|event| event.kind() == Some(harness_session::EventType::ContextCompact))
+    {
+        Some(index) => {
+            if !events[index].output.trim().is_empty() {
+                messages.push(ChatMessage::user(format!(
+                    "{COMPACTED_PREFIX}\n{}",
+                    events[index].output
+                )));
+            }
+            index + 1
+        }
+        None => 0,
+    };
     let mut pending_tool: Option<String> = None;
-    for ev in events {
+    for ev in &events[start..] {
         match ev.event_type.as_str() {
             "user_message" => messages.push(ChatMessage::user(ev.output.clone())),
             "assistant_message" => {
@@ -1334,10 +1522,66 @@ pub fn rebuild_messages(events: &[Event], system_prompt: &str) -> Vec<ChatMessag
     messages
 }
 
+/// Build the bounded digest handed to the summarizer: previous summary plus
+/// user/assistant text and tool names/statuses, never raw tool output.
+fn compact_digest(events: &[Event], last_compact: Option<usize>, max_chars: usize) -> String {
+    let mut out = String::new();
+    let start = match last_compact {
+        Some(index) => {
+            out.push_str("# Earlier compacted summary\n");
+            out.push_str(&truncate_chars(
+                &events[index].output,
+                COMPACT_FALLBACK_CHARS,
+            ));
+            out.push_str("\n\n# Events since then\n");
+            index + 1
+        }
+        None => 0,
+    };
+    for ev in &events[start..] {
+        match ev.event_type.as_str() {
+            "user_message" => {
+                out.push_str("user: ");
+                out.push_str(&truncate_chars(&ev.output, 4_000));
+                out.push('\n');
+            }
+            "assistant_message" if !ev.output.trim().is_empty() => {
+                out.push_str("assistant: ");
+                out.push_str(&truncate_chars(&ev.output, 4_000));
+                out.push('\n');
+            }
+            "tool_call" => {
+                out.push_str(&format!("tool call: {}\n", ev.tool));
+            }
+            "tool_result" => {
+                out.push_str(&format!("tool result: {} -> {}\n", ev.tool, ev.status));
+            }
+            _ => {}
+        }
+    }
+    truncate_chars(&out, max_chars)
+}
+
+/// Deterministic fallback when the provider cannot summarize.
+fn heuristic_summary(digest: &str) -> String {
+    let text = truncate_chars(digest, COMPACT_FALLBACK_CHARS);
+    format!("Automatic summary unavailable. Key events so far (raw log kept on disk):\n{text}")
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut out: String = text.chars().take(max_chars).collect();
+    if text.chars().count() > max_chars {
+        out.push_str("\n… (truncated; the full log is kept on disk)");
+    }
+    out
+}
+
 /// Commands the actor accepts.
 enum Command {
     User(String),
     Cancel,
+    /// Switch to an existing session id (handled between turns).
+    SwitchSession(String),
     Shutdown,
 }
 
@@ -1349,13 +1593,15 @@ enum Command {
 pub struct AgentHandle {
     tx: mpsc::UnboundedSender<Command>,
     events: broadcast::Sender<AgentEvent>,
+    sessions: Arc<SessionManager>,
 }
 
 impl AgentHandle {
-    pub fn spawn(mut agent: Agent) -> Self {
+    pub fn spawn(mut agent: Agent, sessions: Arc<SessionManager>) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         let (events, _) = broadcast::channel::<AgentEvent>(2048);
         let emitter = events.clone();
+        let manager = sessions.clone();
         tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
                 match cmd {
@@ -1389,6 +1635,14 @@ impl AgentHandle {
                                             shutdown = true;
                                             break;
                                         }
+                                        Some(Command::SwitchSession(_)) => {
+                                            // Swapping the log mid-turn would file
+                                            // this turn's events under the wrong
+                                            // conversation.
+                                            let _ = emitter.send(AgentEvent::Error(
+                                                "cannot switch sessions while a turn is running".into(),
+                                            ));
+                                        }
                                         // Ignore new messages while busy.
                                         Some(Command::User(_)) => {}
                                     }
@@ -1399,6 +1653,18 @@ impl AgentHandle {
                             break;
                         }
                     }
+                    Command::SwitchSession(id) => {
+                        match switch_agent_session(&mut agent, &manager, &id).await {
+                            Ok(event) => {
+                                let _ = emitter.send(event);
+                            }
+                            Err(error) => {
+                                let _ = emitter.send(AgentEvent::Error(format!(
+                                    "cannot switch session: {error:#}"
+                                )));
+                            }
+                        }
+                    }
                     Command::Cancel => {
                         let _ = emitter.send(AgentEvent::Error("nothing to cancel".into()));
                     }
@@ -1406,7 +1672,11 @@ impl AgentHandle {
                 }
             }
         });
-        AgentHandle { tx, events }
+        AgentHandle {
+            tx,
+            events,
+            sessions,
+        }
     }
 
     /// Queue a user message. Returns false if the actor has stopped.
@@ -1419,6 +1689,17 @@ impl AgentHandle {
         self.tx.send(Command::Cancel).is_ok()
     }
 
+    /// Switch sessions. The result arrives as [`AgentEvent::SessionChanged`]
+    /// (or `Error` when a turn is running or the id is unknown).
+    pub fn switch_session(&self, id: impl Into<String>) -> bool {
+        self.tx.send(Command::SwitchSession(id.into())).is_ok()
+    }
+
+    /// The shared session manager, for listing/creating/renaming.
+    pub fn sessions(&self) -> Arc<SessionManager> {
+        self.sessions.clone()
+    }
+
     /// Subscribe to the event stream. Each subscriber sees every future event.
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.events.subscribe()
@@ -1427,6 +1708,22 @@ impl AgentHandle {
     pub fn shutdown(&self) {
         let _ = self.tx.send(Command::Shutdown);
     }
+}
+
+/// Make `id` active in the manager and rehydrate the agent from it.
+async fn switch_agent_session(
+    agent: &mut Agent,
+    sessions: &SessionManager,
+    id: &str,
+) -> Result<AgentEvent> {
+    let info = sessions.open(id).await?;
+    let events = agent.switch_session(sessions.active_store().await).await?;
+    Ok(AgentEvent::SessionChanged {
+        id: info.id,
+        title: info.title,
+        path: info.path.display().to_string(),
+        events,
+    })
 }
 
 #[cfg(test)]
@@ -1571,5 +1868,108 @@ mod tests {
         assert!(message.contains("delete"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replay_starts_at_the_last_compaction() {
+        let events = vec![
+            Event::session_start(),
+            Event::user_message("build a guestbook"),
+            Event::assistant_message("old answer that must not be replayed"),
+            Event::context_compact("guestbook built with SQLite and a form", "model", 3),
+            Event::user_message("now add pagination"),
+            Event::assistant_message("added pagination"),
+        ];
+        let messages = rebuild_messages(&events, "sys");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, crate::message::Role::System);
+        assert!(messages[1].content.contains("guestbook built"));
+        assert!(!messages
+            .iter()
+            .any(|m| m.content.contains("must not be replayed")));
+        assert_eq!(messages[2].content, "now add pagination");
+        assert_eq!(messages[3].content, "added pagination");
+    }
+
+    #[test]
+    fn replay_uses_only_the_most_recent_compaction() {
+        let events = vec![
+            Event::user_message("one"),
+            Event::context_compact("summary one", "model", 1),
+            Event::user_message("two"),
+            Event::context_compact("summary two", "model", 3),
+            Event::user_message("three"),
+        ];
+        let messages = rebuild_messages(&events, "sys");
+        assert_eq!(messages.len(), 3);
+        assert!(messages[1].content.contains("summary two"));
+        assert!(!messages.iter().any(|m| m.content.contains("summary one")));
+        assert_eq!(messages[2].content, "three");
+    }
+
+    #[test]
+    fn the_compaction_digest_keeps_decisions_and_drops_tool_output() {
+        let events = vec![
+            Event::user_message("add a form"),
+            Event::tool_call("write_file", "path=index.wren"),
+            Event::tool_result(
+                "write_file",
+                "",
+                SessionStatus::Ok,
+                "wrote 900 bytes",
+                Some(0),
+            ),
+            Event::assistant_message("the form is ready"),
+        ];
+        let digest = compact_digest(&events, None, 48_000);
+        assert!(digest.contains("user: add a form"));
+        assert!(digest.contains("assistant: the form is ready"));
+        assert!(digest.contains("tool result: write_file -> ok"));
+        assert!(!digest.contains("wrote 900 bytes"));
+    }
+
+    #[tokio::test]
+    async fn compaction_threshold_follows_the_model_window() {
+        let root = std::env::temp_dir().join(format!(
+            "masse-compact-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let session = Arc::new(SessionStore::new(root.join("session.csv")));
+        let config = AgentConfig {
+            model: "deepseek-chat".into(),
+            system_prompt: "sys".into(),
+            compact_at_percent: 1,
+            ..Default::default()
+        };
+        let mut agent = Agent::new(
+            Arc::new(crate::provider::MockProvider::new()),
+            Arc::new(harness_tools::builtin_registry()),
+            ToolContext::new(&root),
+            session,
+            config,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !agent.needs_compaction(),
+            "a short conversation is left alone"
+        );
+        for i in 0..10 {
+            agent.messages.push(ChatMessage::user(format!(
+                "message {i} {}",
+                "x".repeat(600)
+            )));
+        }
+        assert!(agent.needs_compaction());
+
+        agent.config.compact_at_percent = 0;
+        assert!(!agent.needs_compaction(), "0 disables compaction");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -8,8 +8,8 @@ two front ends over the **same persisted session**:
 - a **TUI** built with `ratatui`, started with `masse --tui`;
 - an **HTTP/WebSocket server** built with `axum`, started with `masse --serve`.
 
-The single binary chooses one mode from `--tui` or `--serve`. Either way, the
-whole conversation lives in one file — `.masse/session.csv` — so you can start a
+The single binary chooses one mode from `--tui` or `--serve`. Either way, every
+conversation is an append-only file under `.masse/sessions/`, so you can start a
 turn in the terminal and keep following the same session from a browser.
 
 ```
@@ -30,8 +30,8 @@ Pass `--user-mode` to collapse each turn to the question the model asks when it
 needs an answer and the plain-language explanation when it finishes. Tool
 calls, results, retries and the assistant's step-by-step narration are hidden —
 in both front ends. The mode is fixed for the run and the TUI and server
-respect it. Whatever the mode, the complete transcript is always written to
-`.masse/session.csv`.
+respect it. Whatever the mode, the complete transcript is always written to the
+session log under `.masse/sessions/`.
 
 Assistant messages are **Markdown**, and both front ends render it — headings,
 lists, fenced code, blockquotes, tables and inline emphasis, code and links —
@@ -115,10 +115,37 @@ memory** of masse, never on disk. Restarting masse forgets them; `--tui` and
 
 ## Session persistence
 
-One file, **`.masse/session.csv`**, **exactly one event per physical line**. No
-`history/` directory and no `state.json`: the state is reconstructed by reading
-the CSV, and file history is Git's job. The format is RFC 4180 for separators
-and quoting, with newlines escaped so records never span multiple lines.
+Every conversation is an append-only CSV in its own directory:
+
+```
+.masse/current                        # active session id (one line)
+.masse/sessions/<id>/session.csv      # one conversation
+.masse/archive/<id>/session.csv       # archived conversations, kept forever
+```
+
+There is no index and no `state.json`: the title, timestamps and event count are
+derived from the CSV, and `.masse/current` is the only pointer. A log is **never
+rewritten or truncated** — `masse sessions archive` moves the directory and
+nothing deletes it automatically, so the full conversation stays available for
+debugging and abuse review.
+
+- A session id is a UTC timestamp plus a random suffix
+  (`20261022-153012123-a1b2`), so ids sort chronologically.
+- The title is the last `session_title` event, falling back to the first user
+  message. `masse sessions rename` appends a title; the old one stays in the log.
+- The first message of a session materializes its directory; an unused session
+  leaves nothing behind.
+- Bare `masse` resumes the workspace's current session. `--new` starts another,
+  `--resume <id|last>` picks one, and `masse sessions list|open|rename|archive`
+  manages them from the shell.
+- In the TUI, `Ctrl-N` starts a session and `Ctrl-R` opens the picker; the web
+  UI has a session dropdown and a "+ new" button.
+- `--session <path>` still points at one exact CSV, outside session management.
+  The old single-file `.masse/session.csv` is migrated into a session directory
+  on the first run.
+
+The row format is RFC 4180, **exactly one event per physical line**, with
+newlines escaped so records never span multiple lines.
 
 ```
 timestamp,event_type,role,tool,args,status,output,exit_code
@@ -128,7 +155,7 @@ timestamp,event_type,role,tool,args,status,output,exit_code
 2026-10-08T12:00:07.010Z,tool_result,tool,write_file,path=index.wren|content=...,ok,wrote 812 bytes,
 ```
 
-- `event_type` ∈ `{session_start, user_message, assistant_message, tool_call, tool_result, session_end}`.
+- `event_type` ∈ `{session_start, session_title, user_message, assistant_message, tool_call, tool_result, context_compact, session_end}`.
 - `status` ∈ `{ok, error}`.
 - `args` is a `k=v` map joined with `|`, values percent-encoded.
 - Cells that do not apply are left empty.
@@ -136,8 +163,18 @@ timestamp,event_type,role,tool,args,status,output,exit_code
   backslashes) are escaped** as `\n`, `\r`, `\\`, so a field never contains a
   real line break and every event stays on one line.
 
-The default path is `<workspace>/.masse/session.csv`; override it with
-`--session`.
+### Compacted context, full log
+
+A long session would eventually overflow the model window. Before that happens
+masse appends a `context_compact` event and replays from it, so the next request
+sees a summary instead of the whole transcript. The summary covers the earlier
+events (`method=model`, or `heuristic` when the provider cannot summarize) and
+records how many events it replaced (`covered_events`), which makes later audits
+exact.
+
+The raw events are **kept**: compaction adds a row, it never deletes or rewrites
+one. Compaction runs between turns, only when the context reaches
+`--compact-at` percent of the model window (70 by default, `0` disables it).
 
 On startup masse also ensures the workspace `.gitignore` ignores its runtime
 state: it adds `.masse/` and `_db.sqlite*` when they are missing (idempotent,
@@ -197,7 +234,7 @@ A Cargo workspace of focused crates:
 crates/
   harness-core     runtime: message model, providers, agent loop, context
   harness-tools    every tool (native + CLI), path validation, process registry
-  harness-session  session.csv append-only store and RFC 4180 codec
+  harness-session  named sessions, session.csv append-only store and RFC 4180 codec
   harness-tui      ratatui terminal front end
   harness-server   axum HTTP/WebSocket front end
   harness-cli      the single `masse` binary
@@ -214,7 +251,10 @@ file.
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `-C`, `--workspace` | — | `.` | Project working directory |
-| `--session` | — | `<workspace>/.masse/session.csv` | Session file |
+| `--session` | — | — | Use one exact CSV instead of managed sessions |
+| `--new` | — | — | Start a new session (conflicts with `--resume`/`--session`) |
+| `--resume` | — | current session | Resume a session id, or `last` |
+| `--compact-at` | — | `70` | Compact context at this % of the window (`0` disables; raw log is kept) |
 | `--tui` | — | **default** | Terminal UI |
 | `--serve` | — | — | HTTP/WebSocket server instead of the TUI |
 | `--host` / `--port` | — | `127.0.0.1` / `7001` | Server bind |

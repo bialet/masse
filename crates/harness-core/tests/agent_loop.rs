@@ -12,7 +12,7 @@ use harness_core::{
     Agent, AgentConfig, AgentEvent, AgentHandle, ChatRequest, ChatResponse, Provider,
     ProviderError, ProviderResult, ToolCall,
 };
-use harness_session::SessionStore;
+use harness_session::{SessionManager, SessionStore};
 use harness_tools::{builtin_registry, ToolContext};
 use tokio::sync::broadcast;
 
@@ -266,7 +266,8 @@ async fn cancel_aborts_a_hanging_turn() {
     std::fs::create_dir_all(&root).unwrap();
 
     let agent = build_agent(Arc::new(HangingProvider), &root).await;
-    let handle = AgentHandle::spawn(agent);
+    let sessions = SessionManager::load(&root, None).await.unwrap();
+    let handle = AgentHandle::spawn(agent, sessions);
     let mut rx = handle.subscribe();
 
     assert!(handle.send_user("hi"));
@@ -1051,6 +1052,98 @@ async fn usage_event_reports_tokens_cost_and_context() {
     assert_eq!(report.context_tokens, 64_000);
     assert_eq!(report.context_window, Some(128_000));
     assert_eq!(report.context_percent(), Some(50.0));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn a_full_context_is_compacted_without_losing_the_raw_log() {
+    let root = std::env::temp_dir().join(format!(
+        "masse-compact-loop-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    // Pre-fill the log so the resumed context is over the threshold (1% of
+    // deepseek-chat's 128k window).
+    let session = Arc::new(SessionStore::new(root.join("session.csv")));
+    for i in 0..8 {
+        session
+            .append(&harness_session::Event::user_message(&format!(
+                "request {i} {}",
+                "detail ".repeat(120)
+            )))
+            .await
+            .unwrap();
+        session
+            .append(&harness_session::Event::assistant_message(&format!(
+                "answer {i} {}",
+                "result ".repeat(120)
+            )))
+            .await
+            .unwrap();
+    }
+    let before = session.read_all().await.unwrap().len();
+
+    let mut responses = VecDeque::new();
+    // First call is the summarizer, second is the turn itself.
+    responses.push_back(ChatResponse {
+        content: "Summary: the user asked for eight things and all were done.".into(),
+        ..Default::default()
+    });
+    responses.push_back(ChatResponse {
+        content: "done".into(),
+        ..Default::default()
+    });
+
+    let agent = Agent::new(
+        Arc::new(ScriptedProvider {
+            responses: Mutex::new(responses),
+        }),
+        Arc::new(builtin_registry()),
+        ToolContext::new(&root),
+        session.clone(),
+        AgentConfig {
+            model: "deepseek-chat".into(),
+            system_prompt: "s".into(),
+            compact_at_percent: 1,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let mut agent = agent;
+    let reply = agent.send("one more", None).await.unwrap();
+    assert_eq!(reply, "done");
+
+    let events = session.read_all().await.unwrap();
+    // The raw conversation is still there: nothing was deleted.
+    assert!(events.len() >= before + 3);
+    let compact = events
+        .iter()
+        .position(|e| e.event_type == "context_compact")
+        .expect("a context_compact event must be written");
+    let last_user = events
+        .iter()
+        .rposition(|e| e.event_type == "user_message")
+        .unwrap();
+    assert!(
+        compact < last_user,
+        "the summary must precede the new message"
+    );
+    assert!(events[compact].output.contains("eight things"));
+    assert_eq!(events[compact].args, "method=model|covered_events=16");
+
+    // Replaying the log starts from the summary instead of all 16 events.
+    let replay = harness_core::rebuild_messages(&events, "s");
+    assert!(replay[1].content.contains("eight things"));
+    assert!(!replay.iter().any(|m| m.content.contains("request 0")));
 
     let _ = std::fs::remove_dir_all(&root);
 }
