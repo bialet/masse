@@ -193,7 +193,12 @@ impl SessionManager {
         };
         let path = self.session_path(&id);
         if !path.is_file() {
-            bail!("no such session: {id}");
+            // A session created a moment ago has no log until its first event.
+            // Accept it only when it is already the active one: a typo must
+            // not silently materialize a new session.
+            if self.active_id().await != id {
+                bail!("no such session: {id}");
+            }
         }
         self.set_active(&id, path).await?;
         self.write_current(&id).await?;
@@ -552,6 +557,22 @@ mod tests {
         let id = manager.create(Some("keep me")).await.unwrap().id;
         let err = manager.archive(&id).await.unwrap_err().to_string();
         assert!(err.contains("active"), "{err}");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn a_freshly_created_session_can_be_opened_before_its_first_event() {
+        let root = temp_root("fresh-open");
+        let manager = SessionManager::load(&root, None).await.unwrap();
+        let created = manager.create(None).await.unwrap();
+        assert!(!created.path.exists(), "an unused session has no log yet");
+
+        let opened = manager.open(&created.id).await.unwrap();
+        assert_eq!(opened.id, created.id);
+        assert_eq!(opened.events, 0);
+
+        // An unknown id still fails instead of materializing a session.
+        assert!(manager.open("20260101-000000-ffff").await.is_err());
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 

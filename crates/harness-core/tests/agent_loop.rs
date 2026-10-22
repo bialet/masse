@@ -1147,3 +1147,43 @@ async fn a_full_context_is_compacted_without_losing_the_raw_log() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn switching_to_a_fresh_session_emits_an_empty_transcript() {
+    let root = std::env::temp_dir().join(format!(
+        "masse-switch-fresh-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let sessions = SessionManager::load(&root, None).await.unwrap();
+    let agent = build_agent(Arc::new(FailingProvider), &root).await;
+    let handle = AgentHandle::spawn(agent, sessions.clone());
+    let mut rx = handle.subscribe();
+
+    let fresh = sessions.create(None).await.unwrap();
+    assert!(!fresh.path.exists(), "the new session has no log yet");
+    assert!(handle.switch_session(fresh.id.clone()));
+
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(AgentEvent::SessionChanged { id, events, .. }) = rx.recv().await {
+                if id == fresh.id {
+                    return Some(events);
+                }
+            }
+        }
+    })
+    .await
+    .expect("the actor must answer the switch")
+    .expect("the switch must not fail");
+
+    assert!(events.is_empty(), "a new session starts with an empty view");
+    handle.shutdown();
+    let _ = std::fs::remove_dir_all(&root);
+}
