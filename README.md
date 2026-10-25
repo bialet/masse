@@ -1,5 +1,17 @@
 # masse
 
+Ride Light
+
+    Simplicity is a superpower. Every line of tooling you don't write is a line of your app that ships faster.
+
+    Standards, not frameworks. HTML, SQL, and HTTP have outlived every framework. Master them and your knowledge stays relevant.
+
+    One file to deploy. No containers, no orchestration, no docker-compose.yml. Copy the binary — that's it.
+
+    Batteries included. Server, database, templating — all in one small binary. No external services to provision.
+
+    Ride light. Complexity is a choice. Choose less, and you'll go further than you think. — Masse is a simple AI coding agent for the simple Bialet framework, why is made? Because there is not enough Bialet on the models to work well with any AI coding agent. Once Bialet become popular enough, Masse won't be need it.
+
 `masse` is an AI coding harness written in Rust, purpose-built for building and
 maintaining web applications with **Bialet** (Wren + SQLite) rather than acting
 as a general-purpose shell agent. It runs on **Linux and macOS** only and offers
