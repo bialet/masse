@@ -15,6 +15,33 @@ templates, the database API, and project structure — so it writes idiomatic
    name and message field."
 ```
 
+````{admonition} Using a coding agent?
+:class: tip
+
+If your agent loads skills (Claude Code, Codex, Cursor, OpenCode), install the
+companion skill instead of pasting the prompt:
+
+```bash
+npx skills add bialet/skills --skill bialet-app-builder
+```
+
+It teaches the same conventions in four gated phases — static design first,
+your confirmation, then the database and the logic. Use it *or* the prompt
+below, not both.
+````
+
+<div class="ai-prompt-actions">
+  <button type="button" class="sd-sphinx-override sd-btn sd-text-wrap sd-btn-outline-secondary" data-copy-prompt>
+    <span data-copy-label>Copy Prompt</span>
+  </button>
+</div>
+
+<div class="copy-status" role="status" aria-live="polite"></div>
+
+<p>Or feed the whole site to your tool:
+<a href="llms.txt">llms.txt</a> (index) and
+<a href="llms-full.txt">llms-full.txt</a> (every page, plain text).</p>
+
 ---
 
 ```{literalinclude} prompt-guide.md
