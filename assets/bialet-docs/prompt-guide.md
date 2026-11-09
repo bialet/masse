@@ -1,5 +1,3 @@
-> **masse note:** `toString` is a getter in Wren. Write `val.toString`, never `val.toString()`. See `bialet-pitfalls.md` for the other traps.
-
 # Bialet Project Development Prompt
 
 You are an expert in **Bialet**, a full-stack web framework that integrates the
@@ -9,6 +7,12 @@ database in a single binary — no build step, no config files, no ORM.
 Use this document as your complete reference for writing Bialet applications.
 Everything here reflects the actual framework behavior — don't invent syntax
 or conventions that aren't described below.
+
+For anything this guide only summarises, the full manual is at
+<https://bialet.dev>. Two pages are worth reading before a large build:
+[Common Pitfalls](https://bialet.dev/_sources/pitfalls.md) and
+[Recipes](https://bialet.dev/_sources/recipes.md). A machine-readable index of
+every page is at <https://bialet.dev/llms.txt>.
 
 > ⚠️ **CRITICAL: `Request.post(name)` returns `String | Null`.**
 > It returns `null` when the requested key is not present in the POST payload.
@@ -69,7 +73,8 @@ early PHP: files map directly to URLs, and the server renders full HTML pages.
   routing: deep nesting, many segments, elaborate URL schemes.
 - **Server-side rendering** with inline HTML strings, minimal JavaScript
 - **Direct SQL queries** with parameterized placeholders instead of an ORM
-- **Semantic HTML**, optionally styled with a classless framework like PicoCSS
+- **Semantic HTML**, styled with a classless CSS framework such as **Beak CSS**
+  (loaded from the CDN at `@latest`, with a palette chosen to fit the project)
 
 ## HTML-First: Reach for JS Last
 
@@ -99,8 +104,9 @@ framework.
 
 Write JS only for what HTML/CSS genuinely can't do — live search-as-you-type,
 drag-and-drop, WebSocket-driven updates — and keep it a small inline
-`<script>`, not a framework. See [HTML-First](html-first.md) for the full
-pattern reference.
+`<script>`, not a framework. See
+[HTML-First](https://bialet.dev/_sources/html-first.md) for the full pattern
+reference.
 
 ## Wren Language Essentials
 
@@ -466,15 +472,16 @@ class Layout {
   static render(content) { Layout.render(content, "My App") }
 
   static render(content, title) { <!doctype html>
-    <html lang="en">
+    <html lang="en" data-theme="light">
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>{{ title }}</title>
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/beakcss@latest/dist/beak.min.css" />
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/beakcss@latest/dist/themes/indigo.css" />
       </head>
       <body>
-        <header class="container">
+        <header>
           <nav>
             <ul><li><strong>My App</strong></li></ul>
             <ul>
@@ -484,8 +491,8 @@ class Layout {
           </nav>
         </header>
         {{ content }}
-        <footer class="container">
-          <small>Built with <a href="https://bialet.dev">Bialet</a></small>
+        <footer>
+          <small>&copy; My App</small>
         </footer>
       </body>
     </html> }
@@ -497,7 +504,7 @@ class Layout {
 import "_app/template" for Layout
 
 return Layout.render(
-  <main class="container">
+  <main>
     <h1>Welcome</h1>
   </main>
 )
@@ -729,7 +736,8 @@ d1 < d2; d1 == d2; d1.diff(d2)                      // comparisons work; diff() 
 > `"YYYY-MM-DD"` / `"YYYY-MM-DD HH:MM:SS"` string or another `Date`. To
 > compare two instants, use `.diff`/`.unix` (both plain numbers); to add or
 > subtract calendar days, do the arithmetic on `year`/`month`/`day`
-> yourself (see [Date and Time](datetime.md) for a verified algorithm) —
+> yourself (see [Date and
+> Time](https://bialet.dev/_sources/datetime.md) for a verified algorithm) —
 > there is no shortcut for either.
 
 ## Controllers: Logic at the Top, View at the Bottom
@@ -754,7 +762,7 @@ var users = User.all()
 
 // === VIEW ===
 return Layout.render(
-  <main class="container">
+  <main>
     <h1>Users</h1>
     <table>
       <thead><tr><th>Name</th><th>Email</th></tr></thead>
@@ -1093,12 +1101,71 @@ improves UX (inline delete, edit-in-place):
 
 ## Semantic HTML & Styling
 
-Use proper elements — `<header>`, `<nav>`, `<main class="container">`,
-`<article>`, `<section>`, `<aside>`, `<footer>` — and let a classless CSS
-framework like [PicoCSS](https://picocss.com) style them with zero classes.
-Tailwind (via CDN for prototyping) and vanilla CSS also work — Bialet just
-outputs plain HTML, so any CSS approach applies unchanged. Stylesheets go
-anywhere except behind a `_`/`.` prefix (those return 403).
+Use proper elements — `<header>`, `<nav>`, `<main>`, `<article>`, `<section>`,
+`<aside>`, `<footer>` — and let a classless CSS framework style them with zero
+classes. The default is **Beak CSS**, a classless pure-CSS framework (a fork of
+Pico CSS): there are no utility classes to learn, plain semantic HTML comes
+pre-styled. Load it from the jsDelivr CDN — base first, then one palette,
+**always at `@latest`** (do not pin a version):
+
+```html
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/beakcss@latest/dist/beak.min.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/beakcss@latest/dist/themes/blue.css" />
+```
+
+Pick **one** base layout for the whole project:
+
+- `beak.min.css` — full-width/fluid, for apps and dashboards
+- `beak.contained.min.css` — centered readable column, for blogs, docs, landing
+
+**Choose the palette to match the project — don't default to blue out of
+habit.** Swap the second `<link>` href to one of: `amber`, `blue`, `cyan`,
+`fuchsia`, `green`, `grey`, `indigo`, `jade`, `lime`, `orange`, `pink`,
+`pumpkin`, `purple`, `red`, `sand`, `slate`, `violet`, `yellow`, `zinc`. Set the
+color scheme on `<html>` with `data-theme="light"` or `data-theme="dark"` (omit
+it to follow the OS preference).
+
+Never edit the framework files. Customize through CSS variables in your own
+stylesheet loaded last — everything in Beak lives in `@layer beak`, so
+unlayered app CSS always wins the cascade.
+
+**Color roles: a solid fill is not a surface.** `--beak-primary-background` is
+the **solid button fill**, not a light background. It is the same strong color
+as `--beak-primary`, and the text that goes on it is `--beak-primary-inverse`.
+Use it only behind a filled control (button, badge, progress bar) with inverse
+text. Never use it for cards, callouts, alerts, table rows, chips or hover
+states: it produces a loud, unreadable block. Do not lighten it with `opacity`
+or `filter` either.
+
+For a soft surface derived from the primary, define your own tokens by mixing
+the primary with the page background, and use them in your stylesheet:
+
+```css
+:root {
+  --beak-primary-soft: color-mix(in srgb, var(--beak-primary) 12%, var(--beak-background-color));
+  --beak-primary-soft-border: color-mix(in srgb, var(--beak-primary) 28%, var(--beak-background-color));
+}
+.callout {
+  background: var(--beak-primary-soft);
+  color: var(--beak-primary);
+  border: 1px solid var(--beak-primary-soft-border);
+}
+```
+
+Other useful variables: `--beak-primary`, `--beak-primary-hover`,
+`--beak-primary-focus`, `--beak-secondary*`, `--beak-contrast*`,
+`--beak-background-color`, `--beak-color`, `--beak-muted-color`,
+`--beak-muted-border-color`, `--beak-h1-color`…`--beak-h6-color`,
+`--beak-font-family`, `--beak-font-size`, `--beak-line-height`,
+`--beak-spacing`, `--beak-border-radius`, `--beak-border-width`,
+`--beak-transition`. Before inventing a `--beak-*`, check that it exists in the
+`:root` block of `beak.css`. If you override a color token, override its whole
+family (`--beak-primary`, `--beak-primary-background`, `--beak-primary-border`,
+`--beak-primary-hover*`), not just one.
+
+Tailwind and vanilla CSS also work — Bialet just outputs plain HTML, so any CSS
+approach applies unchanged. Stylesheets go anywhere except behind a `_`/`.`
+prefix (those return 403).
 
 ## Complete Example: Todo List App
 
@@ -1161,14 +1228,15 @@ class Task {
 // _app/template.wren
 class Layout {
   static render(content) { <!doctype html>
-    <html lang="en">
+    <html lang="en" data-theme="dark">
       <head>
         <meta charset="utf-8" />
         <title>Todo</title>
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css" />
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/beakcss@latest/dist/beak.contained.min.css" />
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/beakcss@latest/dist/themes/green.css" />
       </head>
       <body>
-        <main class="container">{{ content }}</main>
+        <main>{{ content }}</main>
       </body>
     </html> }
 }
@@ -1254,3 +1322,5 @@ bialet -t app/main.wren /my/app   # validate with app context (for _app/ imports
 10. **Git**: always add `_db.sqlite3*` to `.gitignore`
 11. **HTML-first**: reach for `<details>`, `popover`, the checkbox/radio CSS
     hack, and server-side query-param filtering before writing JS
+12. **Styling**: semantic HTML + **Beak CSS** (classless) from jsDelivr at
+    `@latest`; pick the base variant and a palette that fit the project

@@ -264,7 +264,7 @@ async fn bialet_docs_serves_bundled_pages() {
     assert!(r.output.contains("notContains"), "{}", r.output);
 
     let r = reg
-        .call("bialet_docs", &ctx, json!({"file": "bialet-recipes.md"}))
+        .call("bialet_docs", &ctx, json!({"file": "recipes.md"}))
         .await;
     assert!(!r.is_error(), "{}", r.output);
     assert!(

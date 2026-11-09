@@ -6,6 +6,12 @@
 # `crates/harness-tools/build.rs`, which walks these folders at build time --
 # so a page copied here is embedded automatically, with no list to update.
 #
+# The framework guide is authored once, in `bialet/docs/prompt-guide.md`, and
+# copied here verbatim. Its links point at bialet.dev (`/_sources/<page>.md`);
+# `localize_doc_links` in `harness-core` rewrites them to the bundled page
+# names at load time, so the same file is valid in both places. Do not edit
+# `assets/bialet_prompt.md` by hand: this script overwrites it.
+#
 # Usage:
 #   bash scripts/sync-bialet-docs.sh [path/to/bialet/docs]
 #
@@ -22,6 +28,12 @@ if [ ! -d "$SRC" ]; then
   exit 1
 fi
 
+if [ ! -f "$SRC/prompt-guide.md" ]; then
+  echo "error: prompt-guide.md not found in $SRC" >&2
+  echo "       the framework prompt is authored there and copied here" >&2
+  exit 1
+fi
+
 mkdir -p "$DST"
 
 # Keep the text sources: Markdown/ReST pages and the example programs they
@@ -35,45 +47,10 @@ rsync -a --delete --prune-empty-dirs \
   --exclude='*' \
   "$SRC/" "$DST/"
 
-# The upstream docs contain a few examples that do not run (notably
-# `val.toString()`). Add a short, non-destructive note at the top of the pages
-# where the wrong form appears, and re-apply it on every sync.
-python3 - "$DST" <<'PY'
-import sys
-from pathlib import Path
-
-notes = {
-    "template.md":
-        "> **masse note:** `toString` is a getter in Wren and `trim` is a method. "
-        "Write `val.toString.trim()`, never `val.toString()` (raises `String does "
-        "not implement 'toString()'`) and never `val.toString.trim` (raises "
-        "`String does not implement 'trim'`).",
-    "prompt-guide.md":
-        "> **masse note:** `toString` is a getter in Wren. Write `val.toString`, "
-        "never `val.toString()`. See `bialet-pitfalls.md` for the other traps.",
-    "database.md":
-        "> **masse note:** Query methods take at most three positional arguments; "
-        "pass one List for four or more (`fetch([a,b,c,d])`). `BIALET_CONFIG` "
-        "stores `(key, val)`, not `(key, value)`. Do not call `Date.new()` inside "
-        "a `Db.migrate` callback: `Date` is not initialized yet and Bialet "
-        "crashes with SIGSEGV; seed dates with SQL `date('now')` instead.",
-    "datetime.md":
-        "> **masse note:** never compare a Date to null with `date == null`; it "
-        "calls `Date.==` and crashes on `other.unix`. Use `if (!date)` or "
-        "`if (null == date)`.",
-}
-root = Path(sys.argv[1])
-for name, note in notes.items():
-    page = root / name
-    if not page.is_file():
-        continue
-    text = page.read_text(encoding="utf-8")
-    marker = note.split("**")[1]
-    if marker in text.splitlines()[0] if text else False:
-        continue
-    page.write_text(note + "\n\n" + text, encoding="utf-8")
-PY
+# Single source of truth for the framework guide.
+cp "$SRC/prompt-guide.md" "$REPO_ROOT/assets/bialet_prompt.md"
 
 pages=$(find "$DST" -type f | wc -l | tr -d ' ')
 bytes=$(find "$DST" -type f -exec cat {} + | wc -c | tr -d ' ')
 echo "synced $pages documentation files ($bytes bytes) from $SRC to $DST"
+echo "synced assets/bialet_prompt.md from $SRC/prompt-guide.md"

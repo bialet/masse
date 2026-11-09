@@ -53,6 +53,16 @@ impl ProjectContext {
     }
 }
 
+/// Docs links in the canonical prompt point at bialet.dev; inside masse they
+/// must name the bundled page so `bialet_docs` can resolve them.
+///
+/// The prompt is authored once, in `bialet/docs/prompt-guide.md`, where the
+/// links have to be absolute to work on the site. Rewriting here keeps a
+/// single source and makes a live copy in a project resolve too.
+pub fn localize_doc_links(text: &str) -> String {
+    text.replace("https://bialet.dev/_sources/", "")
+}
+
 /// Load a live Bialet framework prompt, if one is available.
 ///
 /// Search order: explicit project files first, then the detected docs

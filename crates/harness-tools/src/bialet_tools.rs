@@ -752,7 +752,7 @@ mod tests {
             ("usage.md", "Usage"),
             ("getting-started/1-introduction.md", "Introduction"),
             ("1-introduction.md", "Introduction"),
-            ("bialet-recipes.md", "Money"),
+            ("recipes.md", "Money"),
         ] {
             let out = BialetDocs
                 .call(&ctx, serde_json::json!({"file": page}))

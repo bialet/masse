@@ -1,12 +1,13 @@
-# Bialet Recipes (verified)
+# Recipes
 
-Short, runnable answers to the problems that cost the most round-trips in
-practice. Every snippet on this page was executed with `bialet -r` or against a
-running app. The complete Bialet manual lives in the pages listed by
-`bialet_docs list=true`; this page only fills the gaps between them. Read
-`bialet-pitfalls.md` as well: it lists the API traps that otherwise cost an
-entire turn (`toString` is a getter, a missing `return` returns null, iterating
-null crashes, a literal `%` is `\x25`, Query takes at most three arguments).
+Short, runnable answers to the problems that come up in most apps: dates,
+money, CSV exports, and a few API helpers. Every snippet here was executed with
+`bialet -r` or against a running app.
+
+Read [Common Pitfalls](pitfalls.md) as well: it covers the API traps these
+recipes work around (`toString` is a getter, a missing `return` returns null,
+iterating null crashes, a literal `%` is `\x25`, a Query takes at most three
+arguments).
 
 ## Dates: add days, add months, week start, due dates
 
@@ -72,7 +73,7 @@ Dates.addDays(Date.new(2026, 10, 18), 60).format("#Y-#m-#d") // 2026-12-17
 
 Format tokens are strftime-style with `#` instead of `%`: `#Y #m #d #H #M #S`,
 `#w` (0 = Sunday), `#u` (1 = Monday), `#V` (ISO week), `#F` (ISO date). The
-full table is in `datetime.md`.
+full table is in [Date and Time Functions](datetime.md).
 
 Comparing dates is safe with `<`, `>`, `==`. Comparing date **strings** is not:
 `"2026-01-01" < "2026-02-01"` raises `String does not implement '<(_)'`. Parse
@@ -81,8 +82,8 @@ there is no row.
 
 ## Money: store cents, print two decimals
 
-Wren has no `Num.format`. Store amounts as integer cents and format them with
-a helper; never do float arithmetic on pesos/dollars across many rows.
+Wren has no `Num.format`. Store amounts as integer cents and format them with a
+helper; never do float arithmetic on pesos/dollars across many rows.
 
 ```wren
 class Money {
@@ -155,20 +156,18 @@ inner quote. Link to the route with a normal `<a href="/exportar">Exportar CSV</
 In tests, assert the header instead of the whole file:
 `Test.get("/exportar").status(200).header("Content-Type", "text/csv; charset=utf-8")`.
 
-## `bialet_run` is not a request
+## `bialet -r` is not a request
 
-`bialet_run` executes a bare Wren script. It does **not** create the
-`BIALET_*` tables or a request/session, so these fail there:
+`bialet -r` executes a bare Wren script. It does **not** create the `BIALET_*`
+tables or a request/session, so these fail there:
 
 - `Session.new()` → `Query Error no such table: BIALET_SESSION`
 - `Config.get(...)` → `Query Error no such table: BIALET_CONFIG`
 - App queries (`SELECT ... FROM my_table`) → `no such table`
 
 Use it only for pure language questions (`Date`, `Num`, `String`, `List`,
-`Map`). For framework behaviour, write a test in `_tests/` and run
-`bialet_test`, or start the server and use `curl`. If a probe fails three
-times, stop probing: consult the docs or write the simplest version and let
-`bialet_validate`/`bialet_test` report the real error.
+`Map`). For framework behaviour, write a test in `_tests/` and run `bialet -T`,
+or start the server and try the page.
 
 ## Util and Config
 
@@ -189,16 +188,18 @@ Stable `Util` helpers:
 ```wren
 Config.get("title")            // String or null
 Config.set("title", "Mi app")
-Config.bool("beta_features")   // true/false (true when the key is absent!)
+Config.bool("beta_features")   // true only for "1"/"true"
 Config.num("page_size")        // Num
 Config.enable("beta_features") // same as Config.set("beta_features", "1")
 Config.disable("maintenance")  // same as Config.set("maintenance", "0")
 Config.json("theme")           // parsed JSON value
 ```
 
-`Config.bool(key)` is implemented as `get(key) != "0"`, so it returns **true
-when the key is absent**. For an opt-in flag (a test mode, a feature gate) use
-`Config.get(key) == "1"` and set it explicitly.
+`Config.bool(key)` is an allow-list: `true` for `"1"` and `"true"`
+(case-insensitive), `false` for everything else **including a missing key**. For
+an opt-in flag (a test mode, a feature gate) that is the behavior you want, but
+write `Config.get(key) == "1"` when the default should be obvious at the call
+site. See [Configuration](configuration.md).
 
 ## Queries with more than three parameters
 
@@ -212,7 +213,7 @@ var rows = `SELECT * FROM items WHERE a = ? AND b = ? AND c = ? AND d = ?`
 ```
 
 The same rule applies to `.first`, `.val`, `.toNum`, `.query`, `.toBool` and
-`.order`: three arguments maximum, then an array.
+`.order`: three arguments maximum, then an array. See [Database](database.md).
 
 ## Tests: one database, no noise
 
@@ -235,3 +236,5 @@ The same rule applies to `.first`, `.val`, `.toNum`, `.query`, `.toBool` and
 - `.contains` matches the raw HTML. Interpolation HTML-escapes strings, so a
   title with accents/quotes may appear as entities; assert on text that is
   stable, or read the stored row instead.
+
+See [Testing in Bialet](tests.md) for the full runner reference.

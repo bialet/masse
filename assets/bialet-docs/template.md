@@ -1,5 +1,3 @@
-> **masse note:** `toString` is a getter in Wren and `trim` is a method. Write `val.toString.trim()`, never `val.toString()` (raises `String does not implement 'toString()'`) and never `val.toString.trim` (raises `String does not implement 'trim'`).
-
 # Template
 
 Bialet renders pages using Inline HTML Strings — HTML written directly inside
@@ -629,7 +627,7 @@ class Template {
   </head> }
 
   footer { <footer class="app-footer">
-    <p>Built with <a href="https://bialet.dev">Bialet</a>.</p>
+    <p>&copy; My App</p>
   </footer> }
 }
 ```
@@ -710,10 +708,6 @@ return Template.new().layout(<main>
     <h2>Buy groceries</h2>
     <p>Added 10 minutes ago</p>
   </article>
-
-  <footer class="app-footer">
-    <p>Built with Bialet</p>
-  </footer>
 </main>)
 ```
 

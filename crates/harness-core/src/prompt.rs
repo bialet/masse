@@ -6,7 +6,7 @@
 //! works, and a live copy found in the project or the local Bialet docs takes
 //! precedence when present (it is likely newer).
 
-use crate::context::{FrameworkPrompt, ProjectContext};
+use crate::context::{localize_doc_links, FrameworkPrompt, ProjectContext};
 
 /// The Bialet framework guide shipped inside the binary.
 pub const EMBEDDED_BIALET_PROMPT: &str = include_str!("../../../assets/bialet_prompt.md");
@@ -51,7 +51,7 @@ How to work:
   simplest version and let the compiler/test report the error. Do not burn the
   turn trying names: a concrete file and a failing test teach you more.
 - Wren/Bialet traps that otherwise cost whole turns (details in
-  `bialet-pitfalls.md`):
+  `pitfalls.md`):
   - Every method that produces a value needs an explicit `return`. Wren does
     not return the last expression; a missing `return` yields null, and
     `for (row in null)` crashes the process (SIGSEGV, empty reply).
@@ -108,8 +108,7 @@ How to work:
   `debug*.wren` file you created before finishing. If the app checks CSRF
   (`session.csrfOk`), gate it with `Config.get("test_mode") == "1"` and set that
   in `_init.wren`: `Test.post` has no cookie jar and cannot reuse the token from
-  a previous GET. Do not use `Config.bool("test_mode")`: it is true when the key
-  is absent, which disables CSRF by default.
+  a previous GET.
 - Test by hand too when it helps: the `curl` tool posts to the local Bialet
   server started by `bialet_server_start` (it accepts the same `data` body the
   browser would). It is confined to that server's loopback port — it cannot
@@ -227,7 +226,7 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
                  describe.\n\n",
                 source.display()
             ));
-            prompt.push_str(content.trim());
+            prompt.push_str(localize_doc_links(content).trim());
             prompt.push('\n');
         }
         None => {
@@ -237,7 +236,7 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
                  exactly and do not invent syntax or conventions it does not \
                  describe.\n\n",
             );
-            prompt.push_str(EMBEDDED_BIALET_PROMPT.trim());
+            prompt.push_str(localize_doc_links(EMBEDDED_BIALET_PROMPT).trim());
             prompt.push('\n');
         }
     }
@@ -278,10 +277,10 @@ pub fn build_system_prompt(ctx: &ProjectContext, debug: bool) -> String {
          read a page (for example `datetime.md`, `reference.md`, `database.md`, \
          `forms.md`, `http-calls.md`, `file.md`, `configuration.md`, `security.md`, \
          `deployment.md`, `rest-api.md`, `usage.md`, `tests.md`, `template.md`), \
-         or `list=true` to see every page. `bialet-pitfalls.md` lists the \
+         or `list=true` to see every page. `pitfalls.md` lists the \
          Wren/Bialet traps (getters vs methods, missing `return`, setters, \
          null iteration, nested HTML tags, Query arity/interpolation, `%`, \
-         CSRF in tests, imports). `bialet-recipes.md` has verified answers for \
+         CSRF in tests, imports). `recipes.md` has verified answers for \
          date arithmetic, money formatting (including `1.234,50`), CSV \
          downloads, `Util`/`Config`, and test hygiene. Prefer reading the docs \
          over guessing API names with `bialet_run`.\n",
@@ -387,9 +386,25 @@ mod tests {
         assert!(prompt.contains("database.md"));
         assert!(prompt.contains("tests.md"));
         assert!(prompt.contains("datetime.md"));
-        assert!(prompt.contains("bialet-recipes.md"));
-        assert!(prompt.contains("bialet-pitfalls.md"));
+        assert!(prompt.contains("recipes.md"));
+        assert!(prompt.contains("pitfalls.md"));
         assert!(prompt.contains("Wren core references"));
+    }
+
+    #[test]
+    fn prompt_links_resolve_to_bundled_pages() {
+        // The canonical guide links to bialet.dev; the system prompt must name
+        // the bundled page instead, or `bialet_docs` cannot resolve it.
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(!prompt.contains("bialet.dev/_sources/"));
+        assert!(prompt.contains("](pitfalls.md)"));
+        assert!(prompt.contains("](recipes.md)"));
     }
 
     #[test]

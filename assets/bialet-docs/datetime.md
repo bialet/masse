@@ -1,5 +1,3 @@
-> **masse note:** never compare a Date to null with `date == null`; it calls `Date.==` and crashes on `other.unix`. Use `if (!date)` or `if (null == date)`.
-
 # Date and Time Functions
 
 This page demonstrates the usage of the `Date` class. It covers basic date and

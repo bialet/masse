@@ -35,15 +35,21 @@ embedded page's script (server).
 
 ## Documentation
 
-- `assets/bialet-docs/` is a vendored copy of the **complete** Bialet manual.
-  Sync it, never edit it by hand:
+- `assets/bialet-docs/` is a vendored copy of the **complete** Bialet manual,
+  and `assets/bialet_prompt.md` is a copy of Bialet's `docs/prompt-guide.md`.
+  Sync both, never edit them by hand:
 
   ```bash
   bash scripts/sync-bialet-docs.sh [path/to/bialet/docs]
   ```
 
-- `assets/docs/` holds the curated Wren core references and
-  `bialet-recipes.md` (verified date/money/CSV/`Util`/`Config`/test recipes).
+- The prompt is authored once, in `bialet/docs/prompt-guide.md`, where its doc
+  links are absolute (`https://bialet.dev/_sources/<page>.md`). At load time
+  `harness_core::context::localize_doc_links` rewrites them to the bundled page
+  names, so the same file works on the site and in `bialet_docs`.
+- `assets/docs/` holds the curated Wren core references and the condensed
+  Bialet pages. Verified pitfalls and recipes now live in the manual
+  (`docs/pitfalls.md`, `docs/recipes.md`) and arrive through the same sync.
 - `crates/harness-tools/build.rs` walks both folders and generates the
   manifest, so **adding a page is enough**; there is no `include_str!` list to
   update. A missing page cannot silently stay out of the binary.

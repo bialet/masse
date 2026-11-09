@@ -1,8 +1,11 @@
-# Bialet / Wren pitfalls (verified)
+# Common Pitfalls
 
-These are the traps that repeatedly cost entire turns in real app builds. Each
-one was reproduced with `bialet -r` or against a running app; the error text is
-the one Bialet actually prints.
+These are the traps that bite hardest when building Bialet apps. Each one has
+been reproduced against a running app; where an error message is quoted, it is
+the text Bialet actually prints.
+
+Most are Wren rules rather than Bialet rules, but they only become obvious once
+a page that worked on an empty database meets its first row.
 
 ## 1. `toString` is a getter; `trim` is a method
 
@@ -12,9 +15,9 @@ name=(val) { _name = val.toString.trim() }    // correct
 // name=(val) { _name = val.toString.trim }     // String does not implement 'trim'
 ```
 
-`toString`, `count`, `keys` and `values` are getters: no parentheses.
-`trim` is a **method**: it needs `()`. Mixing the two forms is the single most
-common source of 500s in setters.
+`toString`, `count`, `keys` and `values` are getters: no parentheses. `trim` is
+a **method**: it needs `()`. Mixing the two forms is the most common source of
+500s in setters.
 
 ## 2. Never compare a Date (or a user class) to `null` with `date == null`
 
@@ -42,7 +45,7 @@ static forDay(day) {
 
 A missing `return` yields `null`; the caller then does `for (row in null)` and
 **the whole Bialet process crashes with SIGSEGV (exit 139)**. The browser sees
-`000` / an empty reply, not a nice error.
+`000` / an empty reply, not a friendly error.
 
 ## 4. Never iterate a value that may be null
 
@@ -76,7 +79,8 @@ Config.set("fee_amount", "20000")   // correct
 // Query Error: table BIALET_CONFIG has no column named value
 ```
 
-Use `Config.set/get/bool/num/enable/disable/json`; never hand-write the table.
+Use `Config.set/get/bool/num/enable/disable/json` (see
+[Configuration](configuration.md)); never hand-write the table.
 
 ## 7. Query methods take at most three positional arguments
 
@@ -119,21 +123,21 @@ shared data in a function. `Test` is also preloaded: never
 
 ## 10. Tests use a temporary database; manual HTTP does not
 
-`bialet -T` runs against a temp DB, so test rows do not pollute `_db.sqlite3`.
-Manual `curl` POSTs against `bialet -p` **do** write to `_db.sqlite3`: when you
-verify by hand, delete the rows you inserted (or back up and restore the file).
+`bialet -T` runs against a temporary database, so test rows do not pollute
+`_db.sqlite3`. Manual `curl` POSTs against a running server **do** write to
+`_db.sqlite3`: when you verify by hand, delete the rows you inserted (or back up
+and restore the file).
 
 ## 11. `Date.new(unixSeconds)` does not exist
 
 `Date.new(1792292400)` is a year-1792292400 date, not a timestamp. For date
-arithmetic use the verified `Dates` helpers in `bialet-recipes.md`; for "now"
-use `Date.new()`.
+arithmetic use the helpers in [Recipes](recipes.md); for "now" use `Date.new()`.
 
 ## 12. `Num.fromString` does not understand `1.234,50`
 
 It returns null for thousands separators and decimal commas. Normalize first
-(see `Money.parse` in `bialet-recipes.md`), or store integer cents and parse the
-form value with the helper.
+(see `Money.parse` in [Recipes](recipes.md)), or store integer cents and parse
+the form value with the helper.
 
 ## 13. Assertions match raw markup
 
@@ -151,9 +155,9 @@ var bad = <section><section>Nested</section></section>
 // Cannot nest <section> inside <section>
 ```
 
-The error points at the closing tag, not the opening one, which makes it hard
-to find. Wrap with a different tag (`<div><section>...`) or split the view into
-partials. Other tags can nest normally once the outer tag differs.
+The error points at the closing tag, not the opening one, which makes it hard to
+find. Wrap with a different tag (`<div><section>...`) or split the view into
+partials. See [Template](template.md) for the nesting rules.
 
 ## 15. Assigning a property needs an explicit setter
 
@@ -171,7 +175,7 @@ public setter.
 ## 16. Do not put a Query inside `%(...)` or `{{ }}`
 
 ```wren
-// wrong: Query are not allowed inside handlebars or interpolated expressions
+// wrong: Query is not allowed inside handlebars or interpolated expressions
 System.log("rows: %(`SELECT COUNT(*) FROM loans`.toNum)")
 
 // correct
@@ -191,7 +195,7 @@ rows. `null + 1` crashes. Use a default:
 var max = `SELECT COALESCE(MAX(CAST(number AS INTEGER)), 0) FROM members`.toNum
 ```
 
-This is the classic `/nuevo` 500 on a brand-new database.
+This is the classic 500 on a brand-new database.
 
 ## 18. `List` has no `reverse`
 
@@ -207,7 +211,6 @@ for (i in 0...xs.count) out.add(xs[xs.count - 1 - i])
 ```wren
 var session = Session.new()
 if (Request.isPost) {
-  // Config.bool("test_mode") is TRUE when the key is absent, so use get()=="1".
   if (!session.csrfOk && Config.get("test_mode") != "1") return Response.status(403)
   ...
 }
@@ -219,17 +222,18 @@ if (Request.isPost) {
 previous `Test.get` (there is no cookie jar), so a CSRF-protected form returns
 200 instead of 302. The same applies to any session value: a name set by one
 `Test.get` is not visible to the next `Test.post`. Pass the value in the body
-(or test the domain method directly) instead of relying on session state. Make the check test-aware with a config flag and set it
-once in `_tests/_init.wren`:
+(or test the domain method directly) instead of relying on session state. Make
+the check test-aware with a config flag and set it once in `_tests/_init.wren`:
 
 ```wren
 // _tests/_init.wren
 Config.set("test_mode", "1")
 ```
 
-`Config.bool(key)` returns **true when the key is absent** (`get(key) != "0"`),
-so it is unsafe for an opt-in test flag: it would disable CSRF by default. Use
-`Config.get(key) == "1"`. Never disable CSRF outside the test flag.
+Read that flag with `Config.get("test_mode") == "1"`: it is explicit about the
+"off unless set" default. (`Config.bool` works too — it returns `true` only for
+`"1"`/`"true"`, and `false` for a missing key — but `get` makes the intent
+obvious at the call site.) Never disable CSRF outside the test flag.
 
 Tests also share one `BIALET_CONFIG`: a test that sets a config value leaks it
 into every other test file. Reset the key or use a unique one.
@@ -273,7 +277,7 @@ exercises anything. Use `INSERT OR IGNORE`, or seed distinct values per file.
 ```
 
 `%(...)` only works inside a Wren string literal. In an HTML block Bialet uses
-`{{ expression }}`.
+`{{ expression }}`. See [Template](template.md).
 
 ## 24. Name the columns in every INSERT
 
@@ -295,7 +299,7 @@ var day = Request.post("day")   // null: the key is "dia"
 ```
 
 A mismatch silently yields null; the POST returns 302 but nothing is saved, or
-the controller crashes formatting null. Keep the HTML `name` and the
+the handler crashes formatting null. Keep the HTML `name` and the
 `Request.post`/`Request.get` key identical (or use the same constant).
 
 ## 26. Strings do not implement `<` or `>`
@@ -376,14 +380,14 @@ var extra = count > 0 ? <div class="box">...</div> : ""
 Bialet's `{{ }}` expects an expression, not an inline HTML tree. Assign the
 block to a variable (or a small helper) and interpolate that.
 
-## 30. Private apps need a first-run credential
+## 31. Private apps need a first-run credential
 
 An empty admin key/password either locks everyone out or opens everything. Seed
-one in the migration (`INSERT OR IGNORE ...`) or add a `/primer-uso` page that
+one in the migration (`INSERT OR IGNORE ...`) or add a first-run page that
 creates the first user and shows the recovery key. Then verify login end to end;
-a redirect loop on `/entrar` usually means there is no user to log in with.
+a redirect loop on the login page usually means there is no user to log in with.
 
-## 30. `""` is truthy in Wren
+## 32. `""` is truthy in Wren
 
 ```wren
 var name = Request.post("name") || ""
@@ -394,7 +398,7 @@ if (name.trim().count == 0) { ... }   // correct empty check
 Only `null` and `false` are falsy. Validate empty text with `trim().count == 0`
 (or `trim() == ""`), not `!text`.
 
-## 30. HTML whitespace makes multi-word `.contains` assertions fragile
+## 33. HTML whitespace makes multi-word `.contains` assertions fragile
 
 ```wren
 Test.get("/").contains("1 paciente para")  // fails if the template wraps the line
@@ -403,15 +407,22 @@ Test.get("/").contains("1 paciente para")  // fails if the template wraps the li
 HTML collapses or inserts whitespace between words. Assert a single stable
 token (a heading, a name, a badge) instead of a multi-word sentence.
 
-## 30. Enforce rules in the domain, not only in the UI
+## 34. Enforce rules in the domain, not only in the UI
 
 Disabling a button is not validation: a direct `POST` bypasses it. Put the rule
 in the domain method (and a UNIQUE index where the database can express it).
 Example: "one open loan per book" must be checked in `Loan.create`, not only by
 rendering the button as disabled.
 
-## 30. `bialet_run` is not a request
+## 35. `bialet -r` is not a request
 
-`bialet_run` has no `BIALET_*` tables, no session and no router. `Session.new()`,
-`Config.get(...)` and app queries fail there. Use `_tests/` + `bialet_test`, or
-start the server and use `curl`, for framework behaviour.
+`bialet -r` executes a bare Wren script. It does **not** create the `BIALET_*`
+tables or a request/session, so these fail there:
+
+- `Session.new()` → `Query Error no such table: BIALET_SESSION`
+- `Config.get(...)` → `Query Error no such table: BIALET_CONFIG`
+- App queries (`SELECT ... FROM my_table`) → `no such table`
+
+Use it only for pure language questions (`Date`, `Num`, `String`, `List`,
+`Map`). For framework behaviour, write a test in `_tests/` and run `bialet -T`,
+or start the server and try the page.

@@ -1308,7 +1308,7 @@ impl Agent {
                     let reason = format!(
                         "Turn stopped: `{}` was called {shape_count} times with the same arguments (ignoring numbers). \
                          This is a probe loop, not progress; the remaining iterations would be wasted. \
-                         Read `bialet-pitfalls.md` and `bialet-recipes.md` before the next attempt.",
+                         Read `pitfalls.md` and `recipes.md` before the next attempt.",
                         call.name
                     );
                     emit!(AgentEvent::AssistantMessage(reason.clone()));

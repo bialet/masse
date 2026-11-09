@@ -56,13 +56,17 @@ External classes must be imported explicitly using the GitHub shorthand or full 
 A class to handle incoming HTTP requests, parsing their content, and providing
 convenient access to their components.
 
-### init(message, route, files)
+### init(message, route, files, fields)
 
-Initializes a new Request object with a given message, route, and files.
+Initializes a new Request object. Bialet calls this for you before your code
+runs.
 
-- `message`: The raw HTTP request message.
+- `message`: The raw HTTP request message. For a `multipart/form-data` request
+  it holds the request line and headers only (see [body](#body)).
 - `route`: The route the request is targeting.
 - `files`: The uploaded files data.
+- `fields`: The text fields of a `multipart/form-data` body, already extracted.
+  Empty for any other request.
 
 ### parseQuery(query)
 
@@ -81,6 +85,11 @@ Returns the URI of the request.
 ### body
 
 Returns the body content of the request.
+
+For a `multipart/form-data` request the body is an empty string. The file
+content never enters Wren, and the text fields are read with
+[post(name)](#postname). Use `Request.post()` and `Request.file()` instead of
+parsing the body.
 
 ### isPost
 
@@ -133,6 +142,12 @@ Returns the value of a specified POST parameter, or `null` if not found.
 
 - `name`: The name of the POST parameter.
 - **Returns**: `String` if the key exists in the POST body, `Null` otherwise.
+
+Works for `application/x-www-form-urlencoded` and `multipart/form-data` forms.
+For a multipart form it returns the text fields only: a file part is read with
+[file(name)](#filename) and never appears here. Line breaks in a value (a
+`<textarea>`) are kept, with `\r\n` normalized to `\n`. If a field is repeated,
+the last value wins.
 
 ### route(pos)
 
@@ -645,6 +660,18 @@ Deletes data from a specified table based on its ID.
 - `table`: The name of the table to delete data from.
 - `id`: The ID of the data to delete.
 
+Like `save`, the table name is interpolated into the statement, so it must be a
+plain identifier (letters, digits and `_`, at most 64 characters) and it must
+not name a framework table: a name that fails either check aborts with
+`Invalid table name` or returns `false` instead of running. Never pass a
+request-derived value here; map it to a literal name first.
+
+```wren
+Db.delete("users", 42)              // ok
+Db.delete("users` WHERE 1=1; --", 1) // aborts: Invalid table name
+Db.delete("BIALET_SESSION", 1)      // false
+```
+
 ## Http
 
 A class for making outbound HTTP requests, with shortcuts for the common
@@ -814,9 +841,11 @@ string, or `""` when empty. `Set-Cookie` response headers are stored in the
 jar automatically and sent back on later calls unless a `Cookie` header is set
 explicitly.
 
-The jar is scoped per host and honors the `Domain`, `Path`, `Secure`, and
-`Max-Age` cookie attributes, so a cookie set by one host is never sent to a
-different host.
+The jar is scoped per host: cookies are keyed on the host that set them, so a
+cookie set by one host is never sent to a different host. `Path`, `Secure`, and
+`Max-Age` are honored; the `Domain` attribute is ignored (host-only jar), since
+a `Domain` covering a multi-label public suffix cannot be validated without an
+embedded suffix list.
 
 ### query(params)
 

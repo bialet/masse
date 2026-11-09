@@ -149,13 +149,7 @@ mod tests {
 
     #[test]
     fn curated_wren_references_are_embedded() {
-        for name in [
-            "wren-num.md",
-            "wren-string.md",
-            "wren-list.md",
-            "bialet-recipes.md",
-            "bialet-pitfalls.md",
-        ] {
+        for name in ["wren-num.md", "wren-string.md", "wren-list.md"] {
             let doc = get(name).unwrap_or_else(|| panic!("{name} is not embedded"));
             assert!(doc.content.contains('#'), "{name} has no heading");
         }
