@@ -7,9 +7,11 @@
 
 pub mod csv;
 pub mod event;
+pub mod friction;
 pub mod manager;
 pub mod store;
 
 pub use event::{decode_args, encode_args, encode_json_args, Event, EventType, Status};
+pub use friction::{Category, Entry, Report, Resolution};
 pub use manager::{SessionInfo, SessionManager};
 pub use store::SessionStore;

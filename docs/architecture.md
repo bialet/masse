@@ -103,6 +103,20 @@ the binary at `assets/bialet_prompt.md`), the Wren language guide from wren.io
 The Wren standard library is bundled as `wren-*.md` pages that `bialet_docs`
 serves on demand, so the prompt only carries the language guide.
 
+## Session logs and the friction log
+
+`session.csv` is the only state, so nothing about the model's behaviour needs
+its own store. `harness_session::friction` derives a report from the logs on
+demand: it scans `tool_result` rows from Bialet tools, collapses repeats with
+the same `failure_signature` the agent uses for stuck-loop detection, and — when
+the log shows the next success of that tool — records the edits that preceded it.
+`masse friction` renders that report, and `harness-cli` rewrites
+`.masse/friction.md` at the end of every turn and once at shutdown.
+
+There is deliberately **no friction event type**: adding rows would make a
+second copy of the truth. A report is always reparsable from the CSV, filterable
+(`--since`, `--category`, `--id`) and exportable with `masse friction --export`.
+
 ## Tools
 
 `harness_tools::Tool` is the extension point:
@@ -146,4 +160,5 @@ exit code, which the agent writes to the `tool_result` row.
 - `harness-server` exposes the chat UI, a JSON API and a WebSocket. On connect
   it replays the parsed session, then streams events.
 
-Both stop every tracked background process and shut the actor down on exit.
+Both stop every tracked background process, shut the actor down on exit, and
+write a final friction report.

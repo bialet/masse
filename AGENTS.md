@@ -71,6 +71,9 @@ embedded page's script (server).
   Never delete or rewrite a session log: `masse sessions archive` only moves it.
 - Sessions live under `.masse/sessions/<id>/session.csv`; `.masse/current` is
   the only pointer and `SessionManager` owns it.
+- The Bialet friction log is **derived**, never stored: `harness_session::friction`
+  renders `.masse/friction.md` from `session.csv` on demand. Do not add an event
+  type or an append-only side file for it; that would create a second truth.
 - A `.wren` change is not done until syntax is checked and `bialet_test` is
   green. The agent loop nudges once for syntax (`VALIDATE_BEFORE_FINISH`) and
   once for the test run (`VERIFY_BEFORE_FINISH`) when the model tries to finish

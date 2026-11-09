@@ -127,6 +127,18 @@ impl Event {
         }
     }
 
+    /// A session start that records which model and harness produced the log.
+    ///
+    /// The extra metadata goes in `args`, so the event schema and every reader
+    /// stay unchanged while reports can still say which model hit a failure.
+    pub fn session_start_with(model: &str, harness: &str) -> Self {
+        Event {
+            role: "system".into(),
+            args: encode_args(&[("model", model.to_string()), ("masse", harness.to_string())]),
+            ..Self::blank(EventType::SessionStart)
+        }
+    }
+
     pub fn user_message(text: &str) -> Self {
         Event {
             role: "user".into(),

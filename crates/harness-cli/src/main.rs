@@ -18,7 +18,10 @@ use harness_core::{
     MockProvider, OpenAiProvider, ProjectContext, Provider, DEFAULT_COMPACT_AT_PERCENT,
 };
 use harness_server::AppState;
-use harness_session::SessionManager;
+use harness_session::{
+    friction::{self, Category, Report},
+    Event, SessionManager,
+};
 use harness_tools::skill_tools::SkillTool;
 use harness_tools::{builtin_registry, ToolContext};
 use tokio::io::AsyncWriteExt;
@@ -196,6 +199,32 @@ enum Command {
     Sessions {
         #[command(subcommand)]
         action: SessionsAction,
+    },
+    /// Show the Bialet friction log mined from session logs.
+    ///
+    /// The log records where the model tripped while building a Bialet app:
+    /// failed syntax checks, red tests, docs misses and runtime errors. It is
+    /// regenerated from `.masse/sessions/*/session.csv`, never hand-edited.
+    Friction {
+        /// Write a portable copy instead of refreshing `.masse/friction.md`.
+        #[arg(long)]
+        export: bool,
+        /// Print the report to stdout instead of writing a file.
+        #[arg(long, conflicts_with = "export")]
+        print: bool,
+        /// Where to write the export (default: `friction-YYYYMMDD.md` in the
+        /// workspace).
+        #[arg(long, short = 'o', requires = "export")]
+        output: Option<PathBuf>,
+        /// Report one session id instead of every managed session.
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        /// Only failures first seen on or after this date (YYYY-MM-DD).
+        #[arg(long)]
+        since: Option<String>,
+        /// Only one category: syntax, tests, runtime, docs, other.
+        #[arg(long)]
+        category: Option<String>,
     },
 }
 
@@ -375,6 +404,29 @@ async fn run() -> Result<()> {
     let sessions = SessionManager::load(&root, explicit)
         .await
         .context("opening the session store")?;
+
+    // `masse friction …` only needs the logs, not a provider or a front end.
+    if let Some(Command::Friction {
+        export,
+        print,
+        output,
+        id,
+        since,
+        category,
+    }) = &cli.command
+    {
+        return run_friction(
+            &sessions,
+            *export,
+            *print,
+            output.as_deref(),
+            id.as_deref(),
+            since.as_deref(),
+            category.as_deref(),
+        )
+        .await;
+    }
+
     if cli.new {
         let info = sessions.create(None).await?;
         eprintln!("[masse] new session {}", info.id);
@@ -489,6 +541,9 @@ async fn run() -> Result<()> {
     // Subscribe a durable logger to every event, independent of the front end.
     spawn_event_logger(handle.subscribe(), runtime_log.clone());
 
+    // Refresh the friction log when a turn ends, so it never lags far behind.
+    spawn_friction_writer(handle.subscribe(), sessions.clone());
+
     let result = if !cli.serve {
         eprintln!(
             "[masse] TUI · provider={} model={} tools={} session={} log={}",
@@ -543,6 +598,12 @@ async fn run() -> Result<()> {
     // Kill any background process we started, then stop the actor cleanly.
     processes.stop_all().await;
     handle.shutdown();
+
+    // Final sweep: catches turns that were cancelled or a run that was quit
+    // mid-turn. Best effort — a report problem must not fail a good run.
+    if let Err(e) = regenerate_friction(&sessions).await {
+        eprintln!("[masse] warning: could not write the friction log: {e}");
+    }
     result
 }
 
@@ -743,6 +804,140 @@ async fn resolve_session_id(sessions: &SessionManager, id: &str) -> Result<Strin
         .first()
         .map(|info| info.id.clone())
         .context("there are no sessions yet")
+}
+
+/// `masse friction …`: render the Bialet friction log from the session logs.
+///
+/// This never calls the provider and never modifies a session log, so it works
+/// offline and on any workspace that already has `.masse/sessions/`.
+async fn run_friction(
+    sessions: &SessionManager,
+    export: bool,
+    print: bool,
+    output: Option<&Path>,
+    id: Option<&str>,
+    since: Option<&str>,
+    category: Option<&str>,
+) -> Result<()> {
+    let since = match since {
+        Some(value) => Some(
+            chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+                .with_context(|| format!("invalid --since date `{value}` (use YYYY-MM-DD)"))?,
+        ),
+        None => None,
+    };
+    let category = match category {
+        Some(value) => Some(Category::parse(value).with_context(|| {
+            format!("unknown category `{value}` (syntax, tests, runtime, docs, other)")
+        })?),
+        None => None,
+    };
+
+    let sources = friction_sources(sessions, id).await?;
+    let report = Report::build(&sources, sessions.root(), since, category);
+
+    if print {
+        print!("{}", report.render());
+        return Ok(());
+    }
+
+    let path = if export {
+        match output {
+            Some(path) => {
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    sessions.root().join(path)
+                }
+            }
+            None => sessions.root().join(format!(
+                "friction-{}.md",
+                chrono::Utc::now().format("%Y%m%d")
+            )),
+        }
+    } else {
+        sessions.root().join(".masse").join("friction.md")
+    };
+
+    friction::write_report(&path, &report)
+        .await
+        .with_context(|| format!("cannot write {}", path.display()))?;
+
+    println!(
+        "{} distinct · {} occurrences · {} → {}",
+        report.entries.len(),
+        report.occurrences,
+        if report.sessions == 1 {
+            "1 session".to_string()
+        } else {
+            format!("{} sessions", report.sessions)
+        },
+        path.display()
+    );
+    Ok(())
+}
+
+/// The session logs a report should cover.
+///
+/// An explicit `--session <csv>` is not managed under `.masse/sessions/`, so it
+/// is reported alone. Otherwise every managed session contributes; archived
+/// logs stay out of the default report.
+async fn friction_sources(
+    sessions: &SessionManager,
+    id: Option<&str>,
+) -> Result<Vec<(String, Vec<Event>)>> {
+    if let Some(id) = id {
+        let id = resolve_session_id(sessions, id).await?;
+        let info = sessions.info(&id).await?;
+        let events = info.store().read_all().await?;
+        return Ok(vec![(id, events)]);
+    }
+
+    if !sessions.active_path().await.starts_with(sessions.dir()) {
+        let events = sessions.active_store().await.read_all().await?;
+        return Ok(vec![(sessions.active_id().await, events)]);
+    }
+
+    let mut out = Vec::new();
+    for info in sessions.list().await {
+        let events = info.store().read_all().await?;
+        out.push((info.id, events));
+    }
+    Ok(out)
+}
+
+/// Rewrite `.masse/friction.md` from every managed session.
+async fn regenerate_friction(sessions: &SessionManager) -> Result<()> {
+    let sources = friction_sources(sessions, None).await?;
+    let report = Report::build(&sources, sessions.root(), None, None);
+    let path = sessions.root().join(".masse").join("friction.md");
+    friction::write_report(&path, &report).await?;
+    Ok(())
+}
+
+/// Refresh the friction log at the end of every turn: that is when the model
+/// has just stopped and the errors it hit are still cheap to read back.
+fn spawn_friction_writer(mut rx: broadcast::Receiver<AgentEvent>, sessions: Arc<SessionManager>) {
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(
+                    AgentEvent::Finished { .. } | AgentEvent::TurnFinished | AgentEvent::Error(_),
+                ) => {
+                    if let Err(e) = regenerate_friction(&sessions).await {
+                        let log = sessions.root().join(".masse").join("masse.log");
+                        let ts =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                        let _ = append_line(&log, &format!("{ts} FRICTION   write failed: {e}\n"))
+                            .await;
+                    }
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 /// Append every agent event to a human-readable runtime log, independently of

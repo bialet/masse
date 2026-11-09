@@ -192,6 +192,35 @@ On startup masse also ensures the workspace `.gitignore` ignores its runtime
 state: it adds `.masse/` and `_db.sqlite*` when they are missing (idempotent,
 best-effort).
 
+## Bialet friction log
+
+masse can show where the model actually tripped while building a Bialet app —
+failed syntax checks, red tests, docs misses and runtime errors. The log is
+**derived** from the session CSVs, never appended to, so it can be regenerated
+at any time and never drifts from the record.
+
+```
+masse friction                     # refresh .masse/friction.md (every session)
+masse friction --print             # print it instead of writing a file
+masse friction --id last           # one session
+masse friction --category tests    # syntax | tests | runtime | docs | other
+masse friction --since 2026-11-01  # only failures first seen on/after
+masse friction --export -o out.md  # portable copy to share
+```
+
+Only Bialet tools are collected (`bialet_validate`, `bialet_test`,
+`bialet_docs`, `bialet_run`, the server tools and the log reader), so unrelated
+project errors do not drown the signal. Identical failures collapse into one
+entry with an occurrence count, and when the log shows a later success the entry
+also records which files were edited on the way there and how many calls it
+took. Absolute workspace paths are replaced with `<workspace>` so an export can
+leave the machine.
+
+The file is rewritten after every turn (and once more at shutdown), because it
+is cheap to derive and the errors are freshest right after the model stops.
+`.masse/friction.md` stays local: `.masse/` is gitignored, so sharing is an
+explicit `masse friction --export`.
+
 ## AGENTS.md integration
 
 At startup masse reads `AGENTS.md` from the project root and injects it into the

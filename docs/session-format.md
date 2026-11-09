@@ -57,6 +57,10 @@ Encoding rules: `A–Z a–z 0–9 - _ . ~` are left as-is; every other byte bec
 `%XX` (uppercase hex). `harness_session::encode_json_args` converts a JSON
 argument object into this form; `decode_args` reverses it.
 
+`session_start` may carry provenance in `args` (`model=<id>|masse=<version>`),
+which the friction log uses to attribute failures to a model. The column is
+ignored by replay, so old logs without it still load.
+
 ## Rehydration rules
 
 Reading the file back produces the conversation:

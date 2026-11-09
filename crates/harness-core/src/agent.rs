@@ -8,7 +8,8 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::FutureExt;
 use harness_session::{
-    encode_json_args, Event, SessionManager, SessionStore, Status as SessionStatus,
+    encode_json_args, friction::signature as failure_signature, Event, SessionManager,
+    SessionStore, Status as SessionStatus,
 };
 use harness_tools::cli::{cap_bytes, run as run_cmd, CmdSpec};
 use harness_tools::{ToolContext, ToolRegistry, ToolResult, ToolStatus};
@@ -429,65 +430,6 @@ fn failure_hint(output: &str) -> String {
         }
     }
     first_line(output, 160)
-}
-
-/// Normalize a tool failure into a signature that ignores volatile details
-/// (timestamps, line numbers, row ids, random ids) so a stuck loop is visible
-/// even when the model varies the arguments slightly between attempts.
-fn failure_signature(output: &str) -> String {
-    let mut sig = String::new();
-    let interesting = [
-        "error",
-        "✗",
-        "expected",
-        "failed",
-        "does not implement",
-        "panic",
-        "cannot",
-        "not found",
-        "invalid",
-    ];
-    for line in output.lines() {
-        let low = line.to_lowercase();
-        if !interesting.iter().any(|m| low.contains(m)) {
-            continue;
-        }
-        for token in low.split_whitespace() {
-            // Drop long random identifiers (session ids, hashes, uuids): they
-            // differ on every run and would hide the repeated failure.
-            let alnum = token.chars().filter(|c| c.is_ascii_alphanumeric()).count();
-            let has_digit = token.chars().any(|c| c.is_ascii_digit());
-            if alnum >= 12 && has_digit {
-                continue;
-            }
-            let cleaned: String = token.chars().filter(|c| c.is_alphabetic()).collect();
-            if !cleaned.is_empty() {
-                sig.push_str(&cleaned);
-                sig.push(' ');
-            }
-        }
-        if sig.len() >= 200 {
-            break;
-        }
-    }
-    if sig.trim().is_empty() {
-        // Nothing matched the markers: fall back to the old letters-only pass
-        // so every failure still has a stable signature.
-        let mut last_space = true;
-        for ch in output.chars().flat_map(|c| c.to_lowercase()) {
-            if ch.is_alphabetic() {
-                sig.push(ch);
-                last_space = false;
-            } else if !last_space {
-                sig.push(' ');
-                last_space = true;
-            }
-            if sig.len() >= 200 {
-                break;
-            }
-        }
-    }
-    sig.trim().to_string()
 }
 
 /// Which verification step (if any) is still owed before the turn may end.
@@ -952,7 +894,12 @@ impl Agent {
 
         // Sessions are created lazily: the first event materializes the log.
         if self.session.is_empty().await {
-            self.session.append(&Event::session_start()).await?;
+            let start = if self.config.model.trim().is_empty() {
+                Event::session_start()
+            } else {
+                Event::session_start_with(&self.config.model, env!("CARGO_PKG_VERSION"))
+            };
+            self.session.append(&start).await?;
         }
 
         emit!(AgentEvent::UserMessage(text.to_string()));
@@ -1731,19 +1678,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn failure_signature_ignores_volatile_details() {
-        // Timestamps, line numbers and ids differ between attempts; the failure
-        // is the same one.
-        let a = "2026-10-16 17:54:43 Runtime Error Could not load module 'bialet_cli/bialet/test'.";
-        let b = "2026-10-16 17:55:02 Runtime Error Could not load module 'bialet_cli/bialet/test'.";
-        assert_eq!(failure_signature(a), failure_signature(b));
-
-        // A genuinely different failure must not collapse into the same bucket.
-        let c = "Query does not implement 'fetch(_,_,_,_,_)'.";
-        assert_ne!(failure_signature(a), failure_signature(c));
-    }
-
-    #[test]
     fn known_wren_traps_get_a_targeted_hint() {
         assert!(
             wren_trap_hint("Runtime Error Null does not implement 'isEmpty'.")
@@ -1808,18 +1742,6 @@ mod tests {
 
         let c = normalized_call_signature("bialet_run", r#"{"code":"System.print(Date.new())"}"#);
         assert_ne!(a, c, "a different snippet is a different call");
-    }
-
-    #[test]
-    fn failure_signature_ignores_random_session_ids() {
-        let a = "✗ lista.wren (40ms)\nExpected body to contain \"x\"\nrows=[{key: who, id: oa9jvaiLKlHSJi9YgAGzqa5uE70I3lDwpnK8cqBQ}]";
-        let b = "✗ lista.wren (37ms)\nExpected body to contain \"x\"\nrows=[{key: who, id: U9668fRw8Xm4DkciG6ExGyyvmuEFwB2BTKDwTNRT}]";
-        assert_eq!(
-            failure_signature(a),
-            failure_signature(b),
-            "random ids must not hide a repeated failure"
-        );
-        assert!(failure_signature(a).contains("expected"));
     }
 
     #[test]
