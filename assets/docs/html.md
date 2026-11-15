@@ -152,6 +152,7 @@ before using them.
 
 - `{{ value }}` inside a Bialet inline HTML string is escaped; to emit raw HTML
   built by a helper, interpolate an expression, not a string.
-- Inline HTML strings cannot nest the same tag. Wrap a `<div>` inside a
-  `<section>` or `<article>`, not another `<div>`.
+- Inline HTML strings may nest any tag on Bialet 1.2.17+, including the
+  outermost one; on 1.2.16 and earlier that copy fails with `Cannot nest <div>
+  inside <div>` and the inner block needs a different element.
 - Void elements need a space before the slash in Bialet: `<hr />`, `<input ... />`.

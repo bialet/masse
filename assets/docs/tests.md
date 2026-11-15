@@ -31,6 +31,11 @@ Error at 'Test': Module variable is already defined.
 
 Just start writing assertions at the top of the file.
 
+A test file is checked by running the suite, not by validating it: `bialet -t
+_tests/hi.wren` compiles the file outside the runner and fails with `Test:
+Variable is used but not defined`. Use `bialet -T` (or the `bialet_test` tool)
+for anything under `_tests/`.
+
 ## Layout
 
 ```

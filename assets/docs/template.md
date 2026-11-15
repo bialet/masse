@@ -136,16 +136,17 @@ import "/_app/template" for Layout
 return Layout.render(<main><h1>Welcome</h1></main>)
 ```
 
-A method body that is a single expression returns it implicitly — no `return`
-needed. If you use instance methods instead of `static`, instantiate first:
-`Template.new().layout(...)`, not `Template.layout(...)`.
+A method returns only through `return`; the exception is a body whose whole
+expression sits on the same line as its `{` (`static square(n) { n * n }`). A
+multi-line body that ends in an expression returns `null`. If you use instance
+methods instead of `static`, instantiate first: `Template.new().layout(...)`,
+not `Template.layout(...)`.
 
 ## Pitfalls
 
-- **The outermost tag cannot nest itself.** `<div><div>…</div></div>` fails with
-  `Cannot nest <div> inside <div>`. Wrap with a different element (`<section>`,
-  `<article>`, `<fieldset>`) instead of repeating the parent tag. Once the tree
-  starts with a different tag, that inner tag may repeat freely.
+- **A tag may nest inside itself only from 1.2.17 on.** `<div><div>…</div></div>`
+  fails on 1.2.16 and earlier with `Cannot nest <div> inside <div>`; there, wrap
+  with a different element (`<section>`, `<article>`, `<fieldset>`).
 - **Mismatched inner tags are not validated.** The parser only matches the
   outermost tag; `<div><span>Hello</div>` compiles and is served as-is (the
   browser auto-closes it). Close every tag yourself.
