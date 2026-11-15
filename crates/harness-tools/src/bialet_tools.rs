@@ -153,6 +153,17 @@ impl Tool for BialetValidate {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
+        // A file under `_tests/` only compiles with the runner's prelude, which
+        // defines `Test`. `bialet -t` reports the bogus "Variable is used but
+        // not defined: Test", and the model then "fixes" a correct file.
+        if is_test_file(&ctx.root, &path) {
+            return ToolResult::ok(format!(
+                "skipped `{}`: it is a test file, and `bialet -t` compiles it \
+                 without the `Test` prelude. Check it by running `bialet_test`, \
+                 which runs the suite with that prelude.",
+                ctx.display_path(&path)
+            ));
+        }
         let mut a: Vec<String> = Vec::new();
         if opt_bool(&args, "quiet", true) {
             a.push("-q".into());
@@ -165,6 +176,15 @@ impl Tool for BialetValidate {
             .await;
         ToolResult::from_cmd(&out)
     }
+}
+
+/// True when `path` is the project's `_tests/` folder or a file inside it.
+fn is_test_file(root: &std::path::Path, path: &std::path::Path) -> bool {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|first| first.as_os_str() == "_tests")
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +234,13 @@ impl Tool for BialetTest {
                 Ok(p) => p,
                 Err(e) => return ToolResult::err(e),
             };
+            // `bialet -T DIR` appends `/ _tests` itself, so passing the test
+            // folder gives `_tests/_tests` and "Test directory not found".
+            let path = if path.file_name().is_some_and(|n| n == "_tests") {
+                path.parent().unwrap_or(&path).to_path_buf()
+            } else {
+                path
+            };
             a.push(path.display().to_string());
         }
         let spec = CmdSpec::new(&ctx.bialet_bin).args(a);
@@ -261,6 +288,11 @@ impl Tool for BialetServerStart {
     }
 
     async fn call(&self, ctx: &ToolContext, args: Json) -> ToolResult {
+        let name = opt_str(&args, "name").unwrap_or_else(|| DEFAULT_SERVER_KEY.to_string());
+        // The agent means "make sure a server is running", so a tracked server
+        // with the same key is replaced instead of failing with "already
+        // running (pid ...); stop it first" and burning a turn.
+        let replaced = ctx.processes.stop(&name).await;
         let requested = opt_u64(&args, "port").unwrap_or(7001).min(u16::MAX as u64) as u16;
         // A server that cannot bind exits immediately. Leftover servers are
         // common, so rather than fail, take a free port when the requested one
@@ -275,7 +307,6 @@ impl Tool for BialetServerStart {
             Ok(p) => p,
             Err(e) => return ToolResult::err(e),
         };
-        let name = opt_str(&args, "name").unwrap_or_else(|| DEFAULT_SERVER_KEY.to_string());
         let log = match opt_str(&args, "log") {
             Some(l) => match ctx.resolve(&l) {
                 Ok(p) => p,
@@ -337,8 +368,13 @@ impl Tool for BialetServerStart {
                 } else {
                     String::new()
                 };
+                let replaced_note = if replaced {
+                    format!("; replaced the previous `{name}` server")
+                } else {
+                    String::new()
+                };
                 ToolResult::ok(format!(
-                    "started `{} -p {} {}` (pid {pid}){note}; log: {}",
+                    "started `{} -p {} {}` (pid {pid}){note}; log: {}{replaced_note}",
                     ctx.bialet_bin,
                     port,
                     shown_dir,
@@ -841,5 +877,57 @@ mod tests {
         assert_eq!(result.status, ToolStatus::Error);
         assert!(result.output.contains("SIGSEGV"));
         assert!(result.output.contains("for (x in null)"));
+    }
+
+    /// `bialet -t` compiles a test file without the runner prelude and reports
+    /// "Test: Variable is used but not defined"; the tool must not send that
+    /// bogus error to the model.
+    #[tokio::test]
+    async fn validate_skips_files_under_the_tests_folder() {
+        let root = std::env::temp_dir().join(format!("masse-tests-skip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("_tests")).unwrap();
+        std::fs::write(
+            root.join("_tests/tasks.wren"),
+            "Test.get(\"/\").status(200)\n",
+        )
+        .unwrap();
+
+        let mut ctx = ToolContext::new(&root);
+        // A binary that does not exist: passing proves the tool never ran it.
+        ctx.bialet_bin = "masse-no-such-bialet".into();
+        let out = BialetValidate
+            .call(&ctx, serde_json::json!({"file": "_tests/tasks.wren"}))
+            .await;
+
+        assert_eq!(out.status, ToolStatus::Ok, "{}", out.output);
+        assert!(out.output.contains("test file"), "got: {}", out.output);
+        assert!(out.output.contains("bialet_test"), "got: {}", out.output);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `bialet -T DIR` appends `/ _tests`, so passing the folder itself used to
+    /// produce `_tests/_tests` and "Test directory not found".
+    #[tokio::test]
+    async fn test_dir_normalizes_a_path_that_already_ends_in_tests() {
+        let root = std::env::temp_dir().join(format!("masse-tests-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("_tests")).unwrap();
+
+        let mut ctx = ToolContext::new(&root);
+        ctx.bialet_bin = "/bin/echo".into();
+        let out = BialetTest
+            .call(&ctx, serde_json::json!({"dir": "_tests"}))
+            .await;
+
+        assert_eq!(out.status, ToolStatus::Ok, "{}", out.output);
+        assert!(
+            !out.output.contains("_tests/_tests"),
+            "the folder must be passed once: {}",
+            out.output
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

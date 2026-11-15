@@ -96,7 +96,9 @@ How to work:
   `Test.get("/event?id=5").contains("100")`. Tests are flat statements — there
   is no `describe`/`it`/`expect` API, and `Test` is already in scope, so never
   `import "bialet/test" for Test` (that fails with "Module variable is already
-  defined"). A form change must assert that POST → read round-trip (submit the
+  defined"). A test file is checked by running `bialet_test`, not by
+  `bialet_validate`: the `Test` class comes from the runner's prelude, so a
+  standalone compile reports a bogus "Variable is used but not defined". A form change must assert that POST → read round-trip (submit the
   values, then read the page back), not just that the page renders. Add at least
   one boundary test: today vs a future date, an empty table, the first/last day
   of the month, a leap day. A green suite with one mid-month date misses
@@ -134,9 +136,12 @@ Bialet essentials (always follow, even without the full guide below):
   interpolation. Do not link a CSS framework or a font CDN by default: ship
   semantic HTML, and add a small modern stylesheet only when the page needs to
   look finished (classless frameworks such as µCSS or Beak CSS fit best).
-- Inline HTML strings cannot nest the same tag: `<div><div>...</div></div>` is
-  a parse error. Wrap with a different element (`<section>`, `<article>`,
-  `<fieldset>`) instead of reusing the parent's tag.
+- Inline HTML strings may nest any tag, including the outermost one, on Bialet
+  1.2.17+. On older builds the compiler says `Cannot nest <div> inside <div>`;
+  there, wrap the inner block in a different element (`<section>`,
+  `<article>`, `<fieldset>`). Never build markup by concatenating strings or
+  put a real newline inside a quoted string: write the tags raw and use
+  `{{ ... }}` for values.
 - Data access is direct SQL using backtick query literals with `?` placeholders.
   There is no ORM. Values come back as strings: convert with `Num.fromString`.
 - A Query method takes **at most three positional parameters**; for four or
@@ -370,7 +375,8 @@ mod tests {
             },
             false,
         );
-        assert!(prompt.contains("cannot nest the same tag"));
+        assert!(prompt.contains("may nest any tag"));
+        assert!(prompt.contains("Cannot nest <div> inside <div>"));
         assert!(prompt.contains("LIMIT 1"));
         assert!(prompt.contains("at most three positional parameters"));
     }
