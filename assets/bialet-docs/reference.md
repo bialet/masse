@@ -413,6 +413,13 @@ Returns `true` if the token is valid.
 
 Destroys the current session.
 
+### rotate()
+
+Mints a new session id, deletes the old id's rows, and sets the new cookie.
+Call it after a successful login and **before** any authenticated write, so a
+session identifier planted before authentication is worthless afterwards.
+Returns the new id.
+
 ## Json
 
 A class for handling JSON data, including parsing and stringifying.
@@ -451,6 +458,37 @@ Verifies if a given password matches a hash.
 
 - `password`: The password to verify.
 - `hash`: The hash to compare against the password.
+
+### encrypt(value, secret)
+
+Encrypts `value` with AES-256-GCM and returns a text envelope you can store in a
+`TEXT` column, a cookie, or a config row:
+
+```wren
+var sealed = Util.encrypt("honey", "password")
+// bgcm1$600000$<salt>$<iv>$<ciphertext+tag>
+
+Util.decrypt(sealed, "password")   // "honey"
+```
+
+- `value`: The string to encrypt. Its bytes are preserved exactly, including NUL
+  bytes and non-ASCII.
+- `secret`: Either a passphrase (stretched with PBKDF2-HMAC-SHA256, 600,000
+  iterations, with a fresh random salt per message) or exactly **64 hex
+  characters**, which are used directly as a 256-bit key.
+
+Every call uses a fresh random salt and nonce, so encrypting the same value
+twice produces different ciphertext. Encryption requires an OpenSSL 1.1+ build;
+without one it raises a runtime error rather than using a weaker scheme.
+
+### decrypt(value, secret)
+
+Decrypts an envelope produced by `encrypt`. Returns the plaintext, or `null`
+when the secret is wrong, the value was modified, or the value is not an
+envelope at all. Those cases are deliberately indistinguishable.
+
+- `value`: The envelope.
+- `secret`: The same secret used to encrypt.
 
 ### toNum(val)
 
@@ -526,7 +564,9 @@ padding. Byte-oriented: it encodes the raw UTF-8 bytes, and round-trips with
 
 ### decodeBase64(input)
 
-Decodes a Base64 encoded string.
+Decodes a Base64 encoded string. Returns `null` when the input is not valid
+Base64, so a malformed credential produces a 401 rather than a runtime error.
+The final group may omit its `=` padding.
 
 - `input`: The Base64 encoded string to decode.
 
@@ -625,6 +665,50 @@ Sets a configuration option to a JSON value.
 
 - `key`: The key of the configuration option.
 - `val`: The JSON value to set.
+
+### encrypt(key, value)
+
+Encrypts `value` with AES-256-GCM under the deployment key from
+`--secret-key-file` and stores the envelope as the value of `key`:
+
+```wren
+Config.encrypt("stripe_key", "sk_live_...")
+Config.decrypt("stripe_key")            // "sk_live_..."
+Config.get("stripe_key")                // "bgcm1$0$-..." — never the plaintext
+```
+
+The config key name is authenticated with the ciphertext, so copying an
+encrypted row to a different key makes it fail to decrypt instead of silently
+taking effect somewhere else.
+
+### encrypt(key, value, secret)
+
+Same, with an explicit passphrase or 64-hex-character key instead of the
+deployment key.
+
+### decrypt(key)
+
+Returns the decrypted value of an encrypted row, or `null` when the row is
+missing, the key does not match, or the value was never encrypted.
+
+### decrypt(key, secret)
+
+Same, with the explicit secret used to encrypt it.
+
+## Secret
+
+Read-only view of the deployment key passed with `--secret-key-file`. The key
+material itself is never exposed to Wren: a value that Wren can see can end up
+in a template, a log line, or a `%(...)` interpolation.
+
+### available
+
+`true` when the server was started with a secret key file. Check it at startup
+if your app cannot run without one:
+
+```wren
+if (!Secret.available) Fiber.abort("Start bialet with --secret-key-file")
+```
 
 ## Db
 
