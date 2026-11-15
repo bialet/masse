@@ -539,12 +539,24 @@ fn heading(error: &str) -> String {
 }
 
 fn excerpt(output: &str, root: &Path) -> String {
-    let text: Vec<&str> = output
-        .lines()
-        .take(ERROR_MAX_LINES)
-        .map(str::trim_end)
-        .collect();
-    let joined = text.join("\n");
+    let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
+    // The head is usually boilerplate (migrations, "Running tests in …") and
+    // the failure lands at the end (the test summary, the last compiler error).
+    // Keep both ends, or every long failure collapses into one signature.
+    let picked: Vec<&str> = if lines.len() <= ERROR_MAX_LINES {
+        lines
+    } else {
+        let mut picked: Vec<&str> = lines.iter().take(2).copied().collect();
+        picked.push("…");
+        picked.extend(
+            lines
+                .iter()
+                .skip(lines.len().saturating_sub(ERROR_MAX_LINES - 3))
+                .copied(),
+        );
+        picked
+    };
+    let joined = picked.join("\n");
     let joined = truncate(&joined, ERROR_MAX_CHARS);
     redact(&joined, root)
 }
@@ -875,5 +887,26 @@ mod tests {
             "random ids must not hide a repeated failure"
         );
         assert!(signature(a).contains("expected"));
+    }
+
+    /// A long test run puts the failure after the migration boilerplate. Taking
+    /// only the first lines made every `bialet_test` failure look identical.
+    #[test]
+    fn excerpt_keeps_the_failure_at_the_end() {
+        let migrations = (1..=20)
+            .map(|i| format!("2026-11-15 04:48:18 Log Migration applied - migration {i}\n"))
+            .collect::<String>();
+        let output = format!(
+            "{migrations}2026-11-15 04:48:18 Migration start\nRunning tests in ./_tests...\n\n1 of 3 tests failed in 147ms\nFAIL cuadro.wren: expected 200\n"
+        );
+
+        let text = excerpt(&output, Path::new("/tmp/example"));
+        assert!(text.contains("1 of 3 tests failed"), "got: {text}");
+        assert!(text.contains("FAIL cuadro.wren"), "got: {text}");
+        assert!(
+            text.contains("Migration applied"),
+            "the head stays for context: {text}"
+        );
+        assert!(text.contains('…'), "the skip must be visible: {text}");
     }
 }
