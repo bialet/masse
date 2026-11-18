@@ -25,6 +25,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::broadcast::error::RecvError;
+use unicode_width::UnicodeWidthChar;
 
 const MAX_TRANSCRIPT_LINES: usize = 4000;
 
@@ -56,6 +57,10 @@ struct App {
     input: Vec<char>,
     cursor: usize,
     scroll_back: u16,
+    /// Last drawn transcript geometry, so keys can scroll by a screenful and
+    /// never past the top.
+    page: u16,
+    max_scroll: u16,
     status: String,
     running: bool,
     frame: usize,
@@ -79,6 +84,8 @@ impl App {
             input: Vec::new(),
             cursor: 0,
             scroll_back: 0,
+            page: 1,
+            max_scroll: 0,
             status: "ready".to_string(),
             running: false,
             frame: 0,
@@ -115,6 +122,9 @@ impl App {
         if !history.is_empty() && self.debug {
             self.push_plain("── session restored from session.csv ──", Color::DarkGray);
         }
+        // Replaying a long session can exceed the cap; without this the first
+        // live event would trim a wall of text in one frame.
+        self.trim();
     }
 
     fn ingest_history_event(&mut self, ev: &SessionEvent) {
@@ -267,7 +277,8 @@ impl App {
         }
         self.apply_status(&event);
         self.trim();
-        self.scroll_back = 0;
+        // Read position is the user's: an incoming event must not yank them
+        // back to the tail while they are reading history. `submit` resets it.
     }
 
     /// Update the status line and running flag from an event, in both modes.
@@ -532,8 +543,12 @@ async fn handle_key(app: &mut App, handle: &AgentHandle, key: KeyEvent) {
             app.input.insert(app.cursor, c);
             app.cursor += 1;
         }
-        KeyCode::PageUp => app.scroll_back = app.scroll_back.saturating_add(5),
-        KeyCode::PageDown => app.scroll_back = app.scroll_back.saturating_sub(5),
+        KeyCode::PageUp => {
+            app.scroll_back = app.scroll_back.saturating_add(app.page.max(1));
+        }
+        KeyCode::PageDown => {
+            app.scroll_back = app.scroll_back.saturating_sub(app.page.max(1));
+        }
         KeyCode::Up => {
             if app.input_history.is_empty() {
                 return;
@@ -656,13 +671,16 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
 
     // Transcript
     let inner_width = chunks[0].width.saturating_sub(2).max(1) as usize;
-    let inner_height = chunks[0].height.saturating_sub(2) as usize;
-    let total_visual: usize = app
-        .lines
-        .iter()
-        .map(|l| visual_lines(l.width(), inner_width))
-        .sum();
+    let inner_height = chunks[0].height.saturating_sub(2).max(1) as usize;
+    // Wrap here instead of leaving it to `Paragraph::wrap`: the row count is
+    // only known while rendering with `Wrap`, so the scroll offset used to drift
+    // away from the real bottom and the newest lines were never reached.
+    let wrapped = wrap_lines(&app.lines, inner_width);
+    let total_visual = wrapped.len();
     let max_scroll = total_visual.saturating_sub(inner_height);
+    app.page = inner_height.min(u16::MAX as usize) as u16;
+    app.max_scroll = max_scroll.min(u16::MAX as usize) as u16;
+    app.scroll_back = app.scroll_back.min(app.max_scroll);
     let scroll = max_scroll.saturating_sub(app.scroll_back as usize) as u16;
 
     let session_label = if app.session_title.is_empty() {
@@ -680,14 +698,13 @@ fn ui(frame: &mut Frame, app: &mut App, config: &TuiConfig) {
     } else {
         format!(" masse · {session_label} ")
     };
-    let transcript = Paragraph::new(app.lines.clone())
+    let transcript = Paragraph::new(wrapped)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(transcript_title)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
-        .wrap(Wrap { trim: false })
         .scroll((scroll, 0));
     frame.render_widget(transcript, chunks[0]);
 
@@ -819,6 +836,67 @@ fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
             .border_style(Style::default().fg(Color::Cyan)),
     );
     frame.render_widget(picker_box, rect);
+}
+
+/// Split styled lines so each output line fits `width` columns.
+///
+/// `Paragraph` can wrap on its own, but how many rows that produces is only
+/// known while rendering, so the TUI's scroll math (and `PageUp`) drifted from
+/// the real content and the newest lines were unreachable. Pre-wrapping makes
+/// the number of lines the exact number of rows drawn.
+fn wrap_lines(lines: &[Line<'static>], width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let cells: Vec<(char, Style)> = line
+            .spans
+            .iter()
+            .flat_map(|span| span.content.chars().map(move |c| (c, span.style)))
+            .collect();
+        if cells.is_empty() {
+            // Keep blank lines as rows: they separate blocks in the transcript.
+            out.push(Line::default());
+            continue;
+        }
+        let mut start = 0;
+        while start < cells.len() {
+            let mut cols = 0;
+            let mut end = start;
+            let mut last_space = None;
+            while end < cells.len() {
+                let w = UnicodeWidthChar::width(cells[end].0).unwrap_or(0);
+                if end > start && cols + w > width {
+                    break;
+                }
+                if cells[end].0 == ' ' {
+                    last_space = Some(end);
+                }
+                cols += w;
+                end += 1;
+            }
+            // Break on a word boundary when one fits, otherwise split the long
+            // word at the width; either way no row exceeds `width` columns.
+            let cut = match last_space {
+                Some(space) if end < cells.len() && space + 1 > start => space + 1,
+                _ => end,
+            };
+            out.push(line_from_cells(&cells[start..cut]));
+            start = cut;
+        }
+    }
+    out
+}
+
+/// Rebuild a styled line from `(char, style)` pairs, merging equal neighbours.
+fn line_from_cells(cells: &[(char, Style)]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for &(ch, style) in cells {
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push(ch),
+            _ => spans.push(Span::styled(ch.to_string(), style)),
+        }
+    }
+    Line::from(spans)
 }
 
 fn visual_lines(width: usize, inner: usize) -> usize {
@@ -1033,6 +1111,77 @@ mod tests {
     #[test]
     fn input_box_never_shrinks_below_one_row() {
         assert_eq!(input_box_rows(0, 1, 0), (1, 0));
+    }
+
+    #[test]
+    fn wrapped_rows_never_exceed_the_width() {
+        let source = "abc def ghi ".repeat(12);
+        let wrapped = wrap_lines(&[Line::from(source.clone())], 20);
+        assert!(wrapped.len() > 1);
+        assert!(
+            wrapped.iter().all(|l| l.width() <= 20),
+            "widths: {:?}",
+            wrapped.iter().map(|l| l.width()).collect::<Vec<_>>()
+        );
+        let text: String = wrapped
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert_eq!(text, source, "wrapping must not drop or add characters");
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_is_split() {
+        let wrapped = wrap_lines(&[Line::from("x".repeat(45))], 20);
+        assert_eq!(wrapped.len(), 3);
+        assert!(wrapped.iter().all(|l| l.width() <= 20));
+    }
+
+    #[test]
+    fn blank_lines_keep_their_row() {
+        let wrapped = wrap_lines(&[Line::from("a"), Line::default(), Line::from("b")], 10);
+        assert_eq!(wrapped.len(), 3);
+    }
+
+    /// Regression: the transcript used to wrap inside `Paragraph`, so the row
+    /// count used for scrolling was wrong and the newest lines were never
+    /// reachable (the view stopped partway through an earlier message).
+    #[test]
+    fn the_transcript_reaches_its_newest_line() {
+        let config = TuiConfig {
+            debug: true,
+            ..Default::default()
+        };
+        let mut app = App::new(&config);
+        for i in 0..200 {
+            app.push_plain(format!("line {i}"), Color::Gray);
+        }
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &mut app, &config)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut screen = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                screen.push_str(buf[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+        assert!(screen.contains("line 199"), "screen was:\n{screen}");
+    }
+
+    #[test]
+    fn incoming_events_do_not_reset_scrolling() {
+        let mut app = app(true);
+        for i in 0..50 {
+            app.push_plain(format!("line {i}"), Color::Gray);
+        }
+        app.scroll_back = 10;
+        app.on_agent_event(AgentEvent::AssistantMessage("nuevo".into()));
+        assert_eq!(
+            app.scroll_back, 10,
+            "reading history must not be yanked back to the tail"
+        );
     }
 
     fn app(debug: bool) -> App {

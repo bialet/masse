@@ -10,4 +10,5 @@ harness-session = { path = "../harness-session" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
+unicode-width = { workspace = true }
 crossterm = { workspace = true }

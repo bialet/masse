@@ -29,6 +29,7 @@ clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = { version = "0.8", features = ["ws"] }
 ratatui = "0.29"
+unicode-width = "0.2"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
 uuid = { version = "1", features = ["v4"] }
