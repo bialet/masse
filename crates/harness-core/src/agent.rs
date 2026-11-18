@@ -675,6 +675,7 @@ impl Agent {
             ],
             tools: Vec::new(),
             temperature: 0.1,
+            session_id: Some(self.session.id()),
         };
         let response = self.provider.complete(request).await?;
         self.record_usage(response.usage);
@@ -947,6 +948,7 @@ impl Agent {
                 messages: self.messages.clone(),
                 tools: self.tools.openai_schemas(),
                 temperature: self.config.temperature,
+                session_id: Some(self.session.id()),
             };
             // Retry only transient errors, a bounded number of times; a
             // permanent error (bad request, auth, malformed response) fails
@@ -1398,6 +1400,7 @@ impl Agent {
             messages: wrap_messages,
             tools: Vec::new(),
             temperature: self.config.temperature,
+            session_id: Some(self.session.id()),
         };
         match self.provider.complete(wrap_request).await {
             Ok(response) => {

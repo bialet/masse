@@ -33,6 +33,119 @@ use config::ConfigAction;
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 const DEFAULT_MODEL: &str = "deepseek-chat";
 
+const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/inference/go/openai/v1";
+const OPENCODE_GO_MODEL: &str = "deepseek-v4.1-flash";
+/// Console API keys (Go and pay-as-you-go) all start like this.
+const OPENCODE_KEY_PREFIX: &str = "oc_sk_";
+
+/// Profiles that work with only `provider` and `api_key`: the endpoint and a
+/// default model are built in. A value in the config file still wins.
+const KNOWN_PROFILES: &[(&str, &str, &str)] = &[
+    ("opencode-go", OPENCODE_GO_BASE_URL, OPENCODE_GO_MODEL),
+    (
+        "opencode",
+        "https://opencode.ai/inference/openai/v1",
+        OPENCODE_GO_MODEL,
+    ),
+];
+
+/// Built-in `(base_url, model)` defaults for a profile name.
+fn known_profile(name: &str) -> Option<(&'static str, &'static str)> {
+    KNOWN_PROFILES
+        .iter()
+        .find(|(profile, _, _)| *profile == name)
+        .map(|(_, base_url, model)| (*base_url, *model))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_profiles_bundle_an_endpoint_and_a_model() {
+        let (base_url, model) = known_profile("opencode-go").unwrap();
+        assert_eq!(base_url, "https://opencode.ai/inference/go/openai/v1");
+        assert_eq!(model, "deepseek-v4.1-flash");
+        assert!(known_profile("opencode").is_some());
+        // Ordinary profiles still rely on the config file.
+        assert!(known_profile("deepseek").is_none());
+    }
+
+    fn resolve_from(args: &[&str]) -> Resolved {
+        let matches = Cli::command().get_matches_from(args);
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+        resolve(&cli, &matches).unwrap()
+    }
+
+    /// A path that does not exist, so the tests see an empty config.
+    fn absent_config() -> String {
+        std::env::temp_dir()
+            .join(format!("masse-resolve-test-{}", std::process::id()))
+            .join("config")
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn an_opencode_console_key_alone_selects_go() {
+        let config = absent_config();
+        let resolved = resolve_from(&[
+            "masse",
+            "--config-file",
+            &config,
+            "--api-key",
+            "oc_sk_test",
+            "-C",
+            ".",
+        ]);
+        assert_eq!(resolved.base_url, OPENCODE_GO_BASE_URL);
+        assert_eq!(resolved.model, OPENCODE_GO_MODEL);
+
+        // An explicit model is kept.
+        let resolved = resolve_from(&[
+            "masse",
+            "--config-file",
+            &config,
+            "--api-key",
+            "oc_sk_test",
+            "--model",
+            "glm-5.3",
+            "-C",
+            ".",
+        ]);
+        assert_eq!(resolved.base_url, OPENCODE_GO_BASE_URL);
+        assert_eq!(resolved.model, "glm-5.3");
+
+        // Any explicit endpoint or profile wins over the inference.
+        let resolved = resolve_from(&[
+            "masse",
+            "--config-file",
+            &config,
+            "--api-key",
+            "oc_sk_test",
+            "--base-url",
+            "https://example.test/v1",
+            "-C",
+            ".",
+        ]);
+        assert_eq!(resolved.base_url, "https://example.test/v1");
+        assert_eq!(resolved.model, DEFAULT_MODEL);
+
+        let resolved = resolve_from(&[
+            "masse",
+            "--config-file",
+            &config,
+            "--api-key",
+            "oc_sk_test",
+            "--provider",
+            "deepseek",
+            "-C",
+            ".",
+        ]);
+        assert_eq!(resolved.base_url, DEFAULT_BASE_URL);
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "masse",
@@ -290,17 +403,7 @@ fn resolve(cli: &Cli, matches: &clap::ArgMatches) -> Result<Resolved> {
     // An explicit --provider/MASSE_PROVIDER wins over the file's `provider` key.
     let profile = cli.provider.clone().or_else(|| file.provider.clone());
     let selected = file.resolve(profile.as_deref());
-
-    let base_url = cli
-        .base_url
-        .clone()
-        .or(selected.base_url)
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    let model = cli
-        .model
-        .clone()
-        .or(selected.model)
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let known = profile.as_deref().and_then(known_profile);
 
     let (api_key, api_key_source) = if from_flag(matches, "api_key_file") {
         let p = cli.api_key_file.clone().unwrap_or_default();
@@ -327,6 +430,41 @@ fn resolve(cli: &Cli, matches: &clap::ArgMatches) -> Result<Resolved> {
     } else {
         (None, "none".to_string())
     };
+
+    // An OpenCode Console key (`oc_sk_…`) with no endpoint or profile chosen
+    // means the user intended Console. Default to the Go endpoint; an explicit
+    // base URL, model or profile always wins.
+    let console_key = profile.is_none()
+        && cli.base_url.is_none()
+        && selected.base_url.is_none()
+        && api_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with(OPENCODE_KEY_PREFIX));
+
+    let base_url = cli
+        .base_url
+        .clone()
+        .or(selected.base_url)
+        .or_else(|| known.map(|(base_url, _)| base_url.to_string()))
+        .unwrap_or_else(|| {
+            if console_key {
+                OPENCODE_GO_BASE_URL.to_string()
+            } else {
+                DEFAULT_BASE_URL.to_string()
+            }
+        });
+    let model = cli
+        .model
+        .clone()
+        .or(selected.model)
+        .or_else(|| known.map(|(_, model)| model.to_string()))
+        .unwrap_or_else(|| {
+            if console_key {
+                OPENCODE_GO_MODEL.to_string()
+            } else {
+                DEFAULT_MODEL.to_string()
+            }
+        });
 
     if let Some(key) = &api_key {
         if key.trim().is_empty() {

@@ -32,6 +32,10 @@ impl ProviderError {
 /// Result of a provider call.
 pub type ProviderResult<T> = std::result::Result<T, ProviderError>;
 
+/// How the harness identifies itself to providers. Gateways such as OpenCode
+/// Go reject generic SDK user agents, so the version travels with every call.
+pub const USER_AGENT: &str = concat!("masse/", env!("CARGO_PKG_VERSION"));
+
 /// A single completion request.
 #[derive(Clone, Debug, Default)]
 pub struct ChatRequest {
@@ -40,6 +44,9 @@ pub struct ChatRequest {
     /// OpenAI-format tool schemas.
     pub tools: Vec<Json>,
     pub temperature: f32,
+    /// Stable identifier for the conversation this request belongs to. Providers
+    /// that cache or route per conversation use it; most ignore it.
+    pub session_id: Option<String>,
 }
 
 /// A single completion response.
@@ -72,6 +79,9 @@ pub struct OpenAiProvider {
     base_url: String,
     api_key: String,
     model: String,
+    /// True for OpenCode Console endpoints, which want `x-opencode-session` on
+    /// every request so they can keep a conversation on one route.
+    opencode: bool,
 }
 
 impl OpenAiProvider {
@@ -92,13 +102,16 @@ impl OpenAiProvider {
         request_timeout: Duration,
     ) -> Self {
         let client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(10))
             .timeout(request_timeout)
             .build()
             .unwrap_or_default();
+        let base_url = base_url.into().trim_end_matches('/').to_string();
         OpenAiProvider {
+            opencode: is_opencode_endpoint(&base_url),
             client,
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             api_key: api_key.into(),
             model: model.into(),
         }
@@ -111,6 +124,15 @@ impl OpenAiProvider {
             format!("{}/chat/completions", self.base_url)
         }
     }
+}
+
+/// Whether `base_url` points at OpenCode Console, where the harness should send
+/// its conversation id in `x-opencode-session`.
+fn is_opencode_endpoint(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| host == "opencode.ai" || host.ends_with(".opencode.ai"))
 }
 
 #[async_trait]
@@ -131,14 +153,18 @@ impl Provider for OpenAiProvider {
             body["tool_choice"] = Json::String("auto".into());
         }
 
-        let response = match self
+        let mut http = self
             .client
             .post(self.endpoint())
             .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-        {
+            .json(&body);
+        if self.opencode {
+            if let Some(id) = request.session_id.as_deref().filter(|id| !id.is_empty()) {
+                http = http.header("x-opencode-session", id);
+            }
+        }
+
+        let response = match http.send().await {
             Ok(r) => r,
             Err(e) => {
                 // Network failures (timeout, refused, reset) are transient; a
@@ -305,5 +331,100 @@ impl Provider for MockProvider {
             ),
             ..Default::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    /// Serve exactly one request, returning its head and a valid completion.
+    async fn serve_once() -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = socket.into_split();
+            let mut reader = BufReader::new(reader);
+            let mut head = String::new();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).await.unwrap();
+
+            let reply = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            writer.write_all(response.as_bytes()).await.unwrap();
+            head
+        });
+        (format!("http://{addr}/v1"), handle)
+    }
+
+    fn request(session: Option<&str>) -> ChatRequest {
+        ChatRequest {
+            model: "test-model".into(),
+            session_id: session.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn identifies_itself_with_its_own_user_agent() {
+        let (base_url, server) = serve_once().await;
+        let provider = OpenAiProvider::new(base_url, "sk-test", "test-model");
+        provider.complete(request(None)).await.unwrap();
+        let head = server.await.unwrap().to_ascii_lowercase();
+        assert!(
+            head.contains(&format!(
+                "user-agent: {}\r\n",
+                USER_AGENT.to_ascii_lowercase()
+            )),
+            "user agent missing from:\n{head}"
+        );
+        assert!(!head.contains("x-opencode-session"));
+    }
+
+    #[tokio::test]
+    async fn sends_the_session_to_opencode_endpoints() {
+        let (base_url, server) = serve_once().await;
+        let mut provider = OpenAiProvider::new(base_url, "sk-test", "test-model");
+        // The local test server is not opencode.ai; force the flag.
+        provider.opencode = true;
+        provider
+            .complete(request(Some("20261118-120000-abc")))
+            .await
+            .unwrap();
+        let head = server.await.unwrap().to_ascii_lowercase();
+        assert!(
+            head.contains("x-opencode-session: 20261118-120000-abc\r\n"),
+            "session header missing from:\n{head}"
+        );
+    }
+
+    #[test]
+    fn recognizes_opencode_endpoints_only() {
+        assert!(is_opencode_endpoint(
+            "https://opencode.ai/inference/go/openai/v1"
+        ));
+        assert!(is_opencode_endpoint("https://api.opencode.ai/v1"));
+        assert!(!is_opencode_endpoint("https://api.deepseek.com/v1"));
+        assert!(!is_opencode_endpoint("not a url"));
     }
 }

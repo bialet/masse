@@ -29,6 +29,21 @@ impl SessionStore {
         &self.path
     }
 
+    /// A stable name for this conversation: the session directory for managed
+    /// logs (`<id>/session.csv`), otherwise the file stem. Providers that cache
+    /// or route per conversation get the same value across restarts.
+    pub fn id(&self) -> String {
+        let stem = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "session".to_string());
+        match self.path.parent().and_then(|p| p.file_name()) {
+            Some(dir) if stem == "session" => dir.to_string_lossy().into_owned(),
+            _ => stem,
+        }
+    }
+
     /// Append one event as a CSV record terminated by `\n`.
     pub async fn append(&self, event: &Event) -> std::io::Result<()> {
         let _guard = self.lock.lock().await;
@@ -97,5 +112,14 @@ mod tests {
         assert_eq!(events[1].output, "hi, there");
         assert_eq!(events[2].exit_code_value(), Some(0));
         let _ = tokio::fs::remove_file(&dir).await;
+    }
+
+    #[test]
+    fn id_uses_the_session_directory_for_managed_logs() {
+        let managed = SessionStore::new("/w/.masse/sessions/20261118-120000-abc/session.csv");
+        assert_eq!(managed.id(), "20261118-120000-abc");
+        // An explicit CSV keeps its own stem.
+        let explicit = SessionStore::new("/tmp/scratch.csv");
+        assert_eq!(explicit.id(), "scratch");
     }
 }

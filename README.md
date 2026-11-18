@@ -301,7 +301,7 @@ file.
 | `--host` / `--port` | — | `127.0.0.1` / `7001` | Server bind |
 | `--model` | `MASSE_MODEL` | config file, then `deepseek-chat` | Model id |
 | `--base-url` | `MASSE_BASE_URL` | config file, then `https://api.deepseek.com/v1` | OpenAI-compatible base URL |
-| `--provider` | `MASSE_PROVIDER` | config file's `provider` key | Named provider profile (its `base_url`/`model`/`api_key`) |
+| `--provider` | `MASSE_PROVIDER` | config file's `provider` key | Named provider profile; `opencode-go` and `opencode` come with an endpoint and default model |
 | `--api-key` | `MASSE_API_KEY` | config file | API key (absent ⇒ mock provider) |
 | `--api-key-file` | `MASSE_API_KEY_FILE` | — | Read the key from a file; beats `--api-key` |
 | `--config-file` | `MASSE_CONFIG_FILE` | `<user config dir>/masse/config` | Configuration file |
@@ -372,6 +372,36 @@ config file    : /Users/you/.config/masse/config (loaded)
 model          : deepseek-reasoner
 api key        : sk-t…3456 (from config file [deepseek])
 ```
+
+### OpenCode Go
+
+[OpenCode Go](https://opencode.ai/docs/console/go) is an OpenAI-compatible
+gateway, so it needs no extra flag — pick the built-in `opencode-go` profile and
+store the `oc_sk_…` key:
+
+```bash
+masse config set provider opencode-go
+masse config set-api-key          # prompts; writes opencode-go.api_key
+masse --print-config              # check the resolved endpoint and model
+masse -C ~/code/my-project
+```
+
+The built-in profile supplies the endpoint
+(`https://opencode.ai/inference/go/openai/v1`) and a default model
+(`deepseek-v4.1-flash`); anything in the config file or on the command line
+still wins:
+
+```bash
+masse --model glm-5.3             # or set opencode-go.model in the config file
+```
+
+For pay-as-you-go Console billing use the `opencode` profile instead. Both
+profiles take the same key.
+
+Go asks clients to identify themselves and to keep a conversation on one route.
+masse therefore sends `User-Agent: masse/<version>` on every request, and, for
+`opencode.ai` endpoints, `x-opencode-session: <session id>` — one stable value
+per `session.csv`, including after a restart.
 
 ## Build & run
 
