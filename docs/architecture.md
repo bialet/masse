@@ -109,7 +109,8 @@ serves on demand, so the prompt only carries the language guide.
 its own store. `harness_session::friction` derives a report from the logs on
 demand: it scans `tool_result` rows from Bialet tools, collapses repeats with
 the same `failure_signature` the agent uses for stuck-loop detection, and — when
-the log shows the next success of that tool — records the edits that preceded it.
+the log shows a later success of that tool on the same file — records the edits
+that preceded it.
 `masse friction` renders that report, and `harness-cli` rewrites
 `.masse/friction.md` at the end of every turn and once at shutdown.
 

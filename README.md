@@ -211,10 +211,10 @@ masse friction --export -o out.md  # portable copy to share
 Only Bialet tools are collected (`bialet_validate`, `bialet_test`,
 `bialet_docs`, `bialet_run`, the server tools and the log reader), so unrelated
 project errors do not drown the signal. Identical failures collapse into one
-entry with an occurrence count, and when the log shows a later success the entry
-also records which files were edited on the way there and how many calls it
-took. Absolute workspace paths are replaced with `<workspace>` so an export can
-leave the machine.
+entry with an occurrence count, and when the log shows a later success of the
+same tool on the same file the entry also records which files were edited on the
+way there and how many calls it took. Absolute workspace paths are replaced with
+`<workspace>` so an export can leave the machine.
 
 The file is rewritten after every turn (and once more at shutdown), because it
 is cheap to derive and the errors are freshest right after the model stops.

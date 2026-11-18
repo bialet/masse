@@ -34,9 +34,37 @@ const MUTATING_FILE_TOOLS: [&str; 3] = ["write_file", "edit_file", "delete_file"
 
 /// How much of an error excerpt survives into the report.
 const ERROR_MAX_CHARS: usize = 700;
+/// Content lines kept before the char cap. Wrapper lines do not count.
 const ERROR_MAX_LINES: usize = 6;
+/// Leading lines kept for context, e.g. the migration log before a test run.
+const EXCERPT_HEAD_LINES: usize = 2;
 const CONTEXT_MAX_CHARS: usize = 120;
 const HEADING_MAX_CHARS: usize = 100;
+
+/// Terms that mark a real diagnostic rather than harness boilerplate.
+///
+/// The heading, the excerpt and the signature all use this list, so the line
+/// that names an entry is also the line that keeps it distinct from another
+/// failure and the line that survives the excerpt budget.
+const DIAGNOSTIC_MARKERS: [&str; 17] = [
+    "compilation error",
+    "runtime error",
+    "stack error",
+    "error at",
+    "✗",
+    "fail",
+    "does not implement",
+    "panic",
+    "security error",
+    "syntax errors found",
+    "no documentation matched",
+    "exited immediately",
+    "log file not found",
+    "cannot",
+    "not found",
+    "invalid",
+    "expected",
+];
 
 /// The kind of friction, used only to group the report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -346,13 +374,23 @@ fn context_before(events: &[Event], index: usize) -> String {
         .unwrap_or_default()
 }
 
-/// The next success of the same tool, plus the edits made on the way there.
+/// The next success of the same tool *on the same target*, plus the edits made
+/// on the way there.
+///
+/// A success on a different target is not a resolution: validating another file
+/// says nothing about the broken one, and the log would credit an unrelated
+/// call. Tools with no target argument keep the older same-tool rule.
 fn resolution_after(events: &[Event], index: usize) -> Option<Resolution> {
     let tool = &events[index].tool;
+    let target = target_of(tool, &events[index].args);
     let success = events[index + 1..].iter().position(|e| {
         e.kind() == Some(EventType::ToolResult)
             && &e.tool == tool
             && e.status_kind() == Some(Status::Ok)
+            && match &target {
+                Some(want) => target_of(tool, &e.args).as_deref() == Some(want.as_str()),
+                None => true,
+            }
     })? + index
         + 1;
 
@@ -386,6 +424,21 @@ fn resolution_after(events: &[Event], index: usize) -> Option<Resolution> {
         seconds,
         edits,
     })
+}
+
+/// The argument that names what a tool checked, when there is exactly one.
+///
+/// Only `bialet_validate` has a single target today (`file=`); the rest either
+/// have none or take several arguments that all describe the same run.
+fn target_of(tool: &str, args: &str) -> Option<String> {
+    let key = match tool {
+        "bialet_validate" => "file",
+        _ => return None,
+    };
+    decode_args(args)
+        .into_iter()
+        .find(|(name, value)| name == key && !value.trim().is_empty())
+        .map(|(_, value)| value)
 }
 
 fn models_in(events: &[Event]) -> Vec<String> {
@@ -523,12 +576,21 @@ fn dedup_key(tool: &str, error: &str) -> String {
     format!("{tool}\u{1f}{sig}")
 }
 
-/// First meaningful line of an error, safe to repeat as a Markdown heading.
+/// First line that names the failure, safe to repeat as a Markdown heading.
+///
+/// The first non-empty line is usually `exit_code: 1` or `stdout:`, which makes
+/// every entry share a heading: prefer a line that looks like a diagnostic,
+/// then fall back to the first meaningful line.
 fn heading(error: &str) -> String {
-    let line = error
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
+    let meaningful = || {
+        error
+            .lines()
+            .map(|line| strip_log_timestamp(line.trim()).trim())
+            .filter(|line| !is_wrapper_line(line))
+    };
+    let line = meaningful()
+        .find(|line| is_diagnostic_line(line))
+        .or_else(|| meaningful().next())
         .unwrap_or("(no output)");
     let line = truncate(line, HEADING_MAX_CHARS);
     // An error line that starts with `#` would otherwise become a heading of
@@ -539,26 +601,160 @@ fn heading(error: &str) -> String {
 }
 
 fn excerpt(output: &str, root: &Path) -> String {
-    let lines: Vec<&str> = output.lines().map(str::trim_end).collect();
-    // The head is usually boilerplate (migrations, "Running tests in …") and
-    // the failure lands at the end (the test summary, the last compiler error).
-    // Keep both ends, or every long failure collapses into one signature.
-    let picked: Vec<&str> = if lines.len() <= ERROR_MAX_LINES {
-        lines
-    } else {
-        let mut picked: Vec<&str> = lines.iter().take(2).copied().collect();
-        picked.push("…");
-        picked.extend(
-            lines
-                .iter()
-                .skip(lines.len().saturating_sub(ERROR_MAX_LINES - 3))
-                .copied(),
-        );
-        picked
-    };
-    let joined = picked.join("\n");
-    let joined = truncate(&joined, ERROR_MAX_CHARS);
+    // Wrapper lines (`exit_code:`, `stdout:`) and blank separators carry no
+    // signal; drop them before spending the line budget on them.
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !is_wrapper_line(line))
+        .collect();
+    let picked = excerpt_lines(&lines);
+    let joined = cap_lines(&picked, ERROR_MAX_CHARS);
     redact(&joined, root)
+}
+
+/// Head for context plus the lines that carry the diagnostic, with `…` where
+/// lines were skipped.
+///
+/// A long test run puts the failure after pages of boilerplate, and keeping
+/// only the tail dropped the `✗ file.wren` line that tells two failures apart.
+fn excerpt_lines<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    if lines.len() <= ERROR_MAX_LINES {
+        return lines.to_vec();
+    }
+    let head = EXCERPT_HEAD_LINES.min(lines.len());
+    let mut chosen: BTreeSet<usize> = (0..head).collect();
+    let mut remaining = ERROR_MAX_LINES - head;
+    for (index, line) in lines.iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        if !is_diagnostic_line(line) {
+            continue;
+        }
+        if !chosen.contains(&index) {
+            chosen.insert(index);
+            remaining -= 1;
+            if remaining == 0 {
+                break;
+            }
+        }
+        // A failed test prints its name and then the assertion message: keep
+        // both, or the report only knows that some test failed.
+        if is_failure_header(line) {
+            if let Some(body) = (index + 1..lines.len()).find(|&i| {
+                !chosen.contains(&i) && !is_failure_header(lines[i]) && !is_wrapper_line(lines[i])
+            }) {
+                chosen.insert(body);
+                remaining -= 1;
+            }
+        }
+    }
+    if chosen.len() == head {
+        // No marker at all: the tail is the next best guess (a summary line).
+        for index in lines.len() - remaining..lines.len() {
+            chosen.insert(index);
+        }
+    }
+    assemble(lines, &chosen)
+}
+
+/// The chosen lines in their original order, with `…` for every skipped run.
+fn assemble<'a>(lines: &[&'a str], chosen: &BTreeSet<usize>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut previous: Option<usize> = None;
+    for &index in chosen {
+        let gap = match previous {
+            Some(previous) => index > previous + 1,
+            None => index > 0,
+        };
+        if gap {
+            out.push("…");
+        }
+        out.push(lines[index]);
+        previous = Some(index);
+    }
+    if previous.is_some_and(|index| index + 1 < lines.len()) {
+        out.push("…");
+    }
+    out
+}
+
+/// Join whole lines up to `max_chars`; dropping a line beats cutting one in
+/// half, because half a diagnostic is not a diagnostic.
+fn cap_lines(lines: &[&str], max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for line in lines {
+        let length = line.chars().count();
+        let separator = usize::from(!out.is_empty());
+        if used + separator + length > max_chars {
+            if out.is_empty() {
+                out = truncate(line, max_chars);
+            } else if used + separator < max_chars {
+                out.push('\n');
+                out.push('…');
+            }
+            break;
+        }
+        if separator == 1 {
+            out.push('\n');
+        }
+        out.push_str(line);
+        used += separator + length;
+    }
+    out
+}
+
+/// Drop the `2026-11-18 02:12:39 ` prefix the Bialet logger writes.
+fn strip_log_timestamp(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let digits =
+        |range: std::ops::Range<usize>| range.into_iter().all(|i| bytes[i].is_ascii_digit());
+    if bytes.len() > 19
+        && digits(0..4)
+        && bytes[4] == b'-'
+        && digits(5..7)
+        && bytes[7] == b'-'
+        && digits(8..10)
+        && bytes[10] == b' '
+        && digits(11..13)
+        && bytes[13] == b':'
+        && digits(14..16)
+        && bytes[16] == b':'
+        && digits(17..19)
+        && bytes[19] == b' '
+    {
+        line[19..].trim_start()
+    } else {
+        line
+    }
+}
+
+/// A line `ToolResult::from_cmd` adds around the real output.
+fn is_wrapper_line(line: &str) -> bool {
+    let line = strip_log_timestamp(line.trim()).trim();
+    line.is_empty()
+        || line == "…"
+        || line == "---"
+        || line == "ok"
+        || line.starts_with("exit_code:")
+        || line.starts_with("stdout:")
+        || line.starts_with("stderr:")
+}
+
+/// True when the line carries the diagnostic, not the harness preamble.
+fn is_diagnostic_line(line: &str) -> bool {
+    let line = strip_log_timestamp(line.trim()).to_lowercase();
+    DIAGNOSTIC_MARKERS
+        .iter()
+        .any(|marker| line.contains(marker))
+}
+
+/// A `✗ file.wren (3ms)` or `FAIL file.wren` line: the error text is next.
+fn is_failure_header(line: &str) -> bool {
+    let line = strip_log_timestamp(line.trim()).trim_start();
+    line.starts_with('✗') || line.split_whitespace().next() == Some("FAIL")
 }
 
 /// Replace the absolute workspace path so the report can leave the machine.
@@ -908,5 +1104,202 @@ mod tests {
             "the head stays for context: {text}"
         );
         assert!(text.contains('…'), "the skip must be visible: {text}");
+    }
+
+    const CIVIL: &str = "Error at 'Civil': Module variable is already defined.";
+
+    /// A synthetic `bialet_test` run, shaped like the real output: migration
+    /// noise, passing tests, the failures, then the summary.
+    fn test_run(failures: &[(&str, &str)], millis: u32) -> String {
+        let mut out = String::from(
+            "exit_code: 1\nstdout:\n\
+             2026-11-18 02:14:42 Log Migration applied - Create tasks table\n\
+             2026-11-18 02:14:42 Migration start \n\
+             Running tests in ./_tests...\n\n\
+             \x20 ✓ tarea.wren (19ms)\n\
+             \x20 ✓ acciones.wren (30ms)\n",
+        );
+        for (file, message) in failures {
+            out.push_str(&format!("  ✗ {file} ({millis}ms)\n      {message}\n"));
+        }
+        out.push_str(
+            "\nSummary:\n\nTotal Tests: 4\nPassed Tests: 2\nFailed Tests: 2\n\
+             Skipped Tests: 0\nElapsed Time: 51ms\n",
+        );
+        out
+    }
+
+    #[test]
+    fn headings_name_the_diagnostic_not_the_wrapper() {
+        let validate = "exit_code: 1\nstderr:\n\
+             2026-11-18 02:12:39 Compilation Error _app/domain.wren line 105 \
+             Error at 'isValid': Expect '{' to begin method body.\n\
+             ✗ Syntax errors found in: _app/domain.wren\n";
+        let tests = test_run(&[("prioridad.wren", CIVIL)], 1);
+
+        let validate_heading = heading(validate);
+        assert!(
+            validate_heading.starts_with("Compilation Error"),
+            "got: {validate_heading}"
+        );
+        assert!(
+            !validate_heading.contains("2026-11-18"),
+            "the log timestamp is noise: {validate_heading}"
+        );
+
+        let tests_heading = heading(&tests);
+        assert_eq!(tests_heading, "✗ prioridad.wren (1ms)");
+        assert_ne!(
+            validate_heading, tests_heading,
+            "two different failures need two different headings"
+        );
+    }
+
+    #[test]
+    fn heading_skips_wrappers_and_falls_back_to_the_first_real_line() {
+        assert_eq!(
+            heading("exit_code: 1\nstdout:\n…\n---\nno marker here\n"),
+            "no marker here"
+        );
+        assert_eq!(heading("exit_code: 1\nstdout:\nstderr:\n"), "(no output)");
+    }
+
+    #[test]
+    fn excerpt_keeps_each_failing_test_and_its_error() {
+        let output = test_run(&[("prioridad.wren", CIVIL), ("calendario.wren", CIVIL)], 1);
+        let text = excerpt(&output, path());
+
+        assert!(text.contains("✗ prioridad.wren"), "got: {text}");
+        assert!(text.contains("✗ calendario.wren"), "got: {text}");
+        assert!(text.contains(CIVIL), "got: {text}");
+        assert!(!text.contains("exit_code"), "the wrapper is noise: {text}");
+        assert!(
+            text.contains("Migration applied"),
+            "the head stays for context: {text}"
+        );
+        assert!(text.contains('…'), "the skip must be visible: {text}");
+    }
+
+    #[test]
+    fn excerpt_drops_whole_lines_at_the_char_cap() {
+        let long = |label: &str| format!("{label} Error at 'x': {}", "detail ".repeat(60));
+        let output = format!(
+            "exit_code: 1\nstdout:\nLog Migration applied\n{}\n{}\n",
+            long("first"),
+            long("second")
+        );
+
+        let text = excerpt(&output, path());
+        assert!(
+            text.chars().count() <= ERROR_MAX_CHARS,
+            "the excerpt exceeded the cap: {}",
+            text.chars().count()
+        );
+        assert!(text.contains("first Error at"), "got: {text}");
+        assert!(
+            !text.contains("second Error at"),
+            "an over-budget line is dropped whole, not cut in half: {text}"
+        );
+    }
+
+    #[test]
+    fn distinct_failing_tests_do_not_share_a_signature() {
+        let a = signature(&excerpt(&test_run(&[("prioridad.wren", CIVIL)], 1), path()));
+        let b = signature(&excerpt(
+            &test_run(&[("calendario.wren", CIVIL)], 7),
+            path(),
+        ));
+
+        assert!(a.contains("prioridadwren"), "the file must survive: {a}");
+        assert!(a.contains("civil"), "the error text must survive: {a}");
+        assert_ne!(a, b, "different failing files need different signatures");
+
+        // The same failure with another timing is the same failure.
+        let again = signature(&excerpt(
+            &test_run(&[("prioridad.wren", CIVIL)], 33),
+            path(),
+        ));
+        assert_eq!(a, again);
+    }
+
+    #[test]
+    fn different_failing_tests_stay_separate_in_the_report() {
+        let run = |file: &str| {
+            let mut log = events();
+            log.push(result(
+                "bialet_test",
+                Status::Error,
+                &test_run(&[(file, CIVIL)], 1),
+            ));
+            log
+        };
+        let report = Report::build(
+            &[
+                ("s1".into(), run("prioridad.wren")),
+                ("s2".into(), run("calendario.wren")),
+            ],
+            path(),
+            None,
+            None,
+        );
+        assert_eq!(report.entries.len(), 2);
+        let text = report.render();
+        assert!(text.contains("### ✗ prioridad.wren"), "got: {text}");
+        assert!(text.contains("### ✗ calendario.wren"), "got: {text}");
+    }
+
+    fn validate_event(file: &str, status: Status, output: &str) -> Event {
+        Event::tool_result(
+            "bialet_validate",
+            &crate::event::encode_args(&[("file", file.to_string())]),
+            status,
+            output,
+            Some(if status == Status::Ok { 0 } else { 1 }),
+        )
+    }
+
+    #[test]
+    fn a_validate_of_another_file_does_not_resolve_the_failure() {
+        let mut log = events();
+        log.push(validate_event(
+            "_app/domain.wren",
+            Status::Error,
+            "Compilation Error _app/domain.wren line 105 Error at 'isValid': Expect '{' to begin method body.",
+        ));
+        log.push(validate_event("_app/template.wren", Status::Ok, "ok"));
+
+        let found = scan_session("s1", &log, path());
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0].resolution.is_none(),
+            "a green check of another file is not a fix: {:?}",
+            found[0].resolution
+        );
+    }
+
+    #[test]
+    fn a_validate_of_the_same_file_still_resolves_after_an_edit() {
+        let mut log = events();
+        log.push(validate_event(
+            "_app/domain.wren",
+            Status::Error,
+            "Compilation Error _app/domain.wren line 105 Error at 'isValid': Expect '{' to begin method body.",
+        ));
+        // Same tool, other file: skipped, not mistaken for the fix.
+        log.push(validate_event("_app/template.wren", Status::Ok, "ok"));
+        log.push(Event::tool_call(
+            "edit_file",
+            &crate::event::encode_args(&[("path", "_app/domain.wren".to_string())]),
+        ));
+        log.push(result("edit_file", Status::Ok, "ok"));
+        log.push(validate_event("_app/domain.wren", Status::Ok, "syntax ok"));
+
+        let found = scan_session("s1", &log, path());
+        let resolution = found[0].resolution.as_ref().expect("resolved");
+        assert_eq!(
+            resolution.calls, 3,
+            "the other file, the edit and the green check"
+        );
+        assert_eq!(resolution.edits, vec!["_app/domain.wren"]);
     }
 }
