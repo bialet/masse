@@ -187,6 +187,8 @@ exact.
 The raw events are **kept**: compaction adds a row, it never deletes or rewrites
 one. Compaction runs between turns, only when the context reaches
 `--compact-at` percent of the model window (70 by default, `0` disables it).
+`MASSE_COMPACT_AT` sets the same threshold; IZAR uses 60 so a long turn has
+more headroom before the next one starts.
 
 On startup masse also ensures the workspace `.gitignore` ignores its runtime
 state: it adds `.masse/` and `_db.sqlite*` when they are missing (idempotent,
@@ -201,6 +203,7 @@ at any time and never drifts from the record.
 
 ```
 masse friction                     # refresh .masse/friction.md (every session)
+masse friction --include-archived  # also sessions archived by `sessions archive`
 masse friction --print             # print it instead of writing a file
 masse friction --id last           # one session
 masse friction --category tests    # syntax | tests | runtime | docs | other
@@ -217,7 +220,10 @@ way there and how many calls it took. Absolute workspace paths are replaced with
 `<workspace>` so an export can leave the machine.
 
 The file is rewritten after every turn (and once more at shutdown), because it
-is cheap to derive and the errors are freshest right after the model stops.
+is cheap to derive and the errors are freshest right after the model stops. The
+automatic report includes archived sessions, so publishing a draft (which
+archives its logs) does not erase the friction that made the app better; the
+`masse friction` command keeps them out unless `--include-archived` is given.
 `.masse/friction.md` stays local: `.masse/` is gitignored, so sharing is an
 explicit `masse friction --export`.
 
@@ -295,7 +301,7 @@ file.
 | `--session` | — | — | Use one exact CSV instead of managed sessions |
 | `--new` | — | — | Start a new session (conflicts with `--resume`/`--session`) |
 | `--resume` | — | current session | Resume a session id, or `last` |
-| `--compact-at` | — | `70` | Compact context at this % of the window (`0` disables; raw log is kept) |
+| `--compact-at` | `MASSE_COMPACT_AT` | `70` | Compact context at this % of the window (`0` disables; raw log is kept) |
 | `--tui` | — | **default** | Terminal UI |
 | `--serve` | — | — | HTTP/WebSocket server instead of the TUI |
 | `--host` / `--port` | — | `127.0.0.1` / `7001` | Server bind |

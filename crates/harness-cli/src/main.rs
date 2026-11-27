@@ -172,7 +172,7 @@ struct Cli {
 
     /// Compact the model context at this percentage of the context window.
     /// The full conversation is always kept in session.csv. 0 disables it.
-    #[arg(long, default_value_t = DEFAULT_COMPACT_AT_PERCENT, value_name = "PERCENT")]
+    #[arg(long, default_value_t = DEFAULT_COMPACT_AT_PERCENT, value_name = "PERCENT", env = "MASSE_COMPACT_AT")]
     compact_at: u64,
 
     /// Run the terminal UI (default).
@@ -338,6 +338,9 @@ enum Command {
         /// Only one category: syntax, tests, runtime, docs, other.
         #[arg(long)]
         category: Option<String>,
+        /// Include sessions in `.masse/archive/` (published drafts).
+        #[arg(long)]
+        include_archived: bool,
     },
 }
 
@@ -551,6 +554,7 @@ async fn run() -> Result<()> {
         id,
         since,
         category,
+        include_archived,
     }) = &cli.command
     {
         return run_friction(
@@ -561,6 +565,7 @@ async fn run() -> Result<()> {
             id.as_deref(),
             since.as_deref(),
             category.as_deref(),
+            *include_archived,
         )
         .await;
     }
@@ -956,6 +961,7 @@ async fn run_friction(
     id: Option<&str>,
     since: Option<&str>,
     category: Option<&str>,
+    include_archived: bool,
 ) -> Result<()> {
     let since = match since {
         Some(value) => Some(
@@ -971,7 +977,7 @@ async fn run_friction(
         None => None,
     };
 
-    let sources = friction_sources(sessions, id).await?;
+    let sources = friction_sources(sessions, id, include_archived).await?;
     let report = Report::build(&sources, sessions.root(), since, category);
 
     if print {
@@ -1023,6 +1029,7 @@ async fn run_friction(
 async fn friction_sources(
     sessions: &SessionManager,
     id: Option<&str>,
+    include_archived: bool,
 ) -> Result<Vec<(String, Vec<Event>)>> {
     if let Some(id) = id {
         let id = resolve_session_id(sessions, id).await?;
@@ -1041,12 +1048,18 @@ async fn friction_sources(
         let events = info.store().read_all().await?;
         out.push((info.id, events));
     }
+    if include_archived {
+        for info in sessions.list_archived().await {
+            let events = info.store().read_all().await?;
+            out.push((info.id, events));
+        }
+    }
     Ok(out)
 }
 
 /// Rewrite `.masse/friction.md` from every managed session.
 async fn regenerate_friction(sessions: &SessionManager) -> Result<()> {
-    let sources = friction_sources(sessions, None).await?;
+    let sources = friction_sources(sessions, None, true).await?;
     let report = Report::build(&sources, sessions.root(), None, None);
     let path = sessions.root().join(".masse").join("friction.md");
     friction::write_report(&path, &report).await?;

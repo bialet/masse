@@ -81,6 +81,21 @@ How to work:
     Let SQL produce dates (`date('now')`) or seed after boot.
   - Every file imports what it uses. A template that calls a domain helper
     needs its own `import "/_app/domain" for Periods`.
+  - A list with a form per row: keep the whole `<li>` inside the `map` block
+    and close it before the final `} }}`. "Expect end of HTML interpolation" or
+    "Unclosed <li>" almost always means a tag was opened inside `{{ }}` and
+    closed outside (or the reverse). Worked shape:
+    `<li>{{ task.title }} {{ Actions.toggle(task, back) }}</li>`, with the
+    helper returning the `<form>`.
+  - If a field is saved, show it where the record is read (a reason, a lesson,
+    an observation). An empty state must distinguish "nothing yet" from
+    "nothing in progress": don't say "todavía no cargaste nada" next to a
+    counter of closed items.
+  - File uploads: the form needs `enctype="multipart/form-data"`; `var file =
+    Request.file("photo")` returns a temporary file, so call `file.save` and
+    store `file.id`. The host accepts ~512 KB per file: shrink photos in the
+    browser (canvas → JPEG) and show a readable error when the file is missing
+    or too large, instead of a blank page.
 - Keep every tool argument small (well under 8 KB). Split a large file into a
   `write_file` followed by `edit_file` calls instead of one huge payload; an
   oversized payload can be cut off mid-JSON and the call will not run.
@@ -107,10 +122,12 @@ How to work:
 - Keep the test suite small and quiet. All files in `_tests/` share one
   temporary database per run, so do not assume isolation; seed shared rows in
   `_tests/_init.wren`. Never `System.print` a whole table, and delete any
-  `debug*.wren` file you created before finishing. If the app checks CSRF
-  (`session.csrfOk`), gate it with `Config.get("test_mode") == "1"` and set that
-  in `_init.wren`: `Test.post` has no cookie jar and cannot reuse the token from
-  a previous GET.
+  `debug*.wren` file you created before finishing. A CSRF-protected form is
+  tested with the token, not by turning CSRF off: `var token =
+  Test.get("/tarea").csrf()` and then `Test.post("/tarea", {"_bialet_csrf":
+  token, "title": "..."}).status(302)`. Never add `Config.get("test_mode")`,
+  `if (testing)` or `session.csrfOk || ...` to production code; that bypass is
+  a release blocker.
 - Test by hand too when it helps: the `curl` tool posts to the local Bialet
   server started by `bialet_server_start` (it accepts the same `data` body the
   browser would). It is confined to that server's loopback port — it cannot
@@ -325,6 +342,20 @@ mod tests {
         );
         assert!(prompt.contains("Bialet"));
         assert!(prompt.contains("Request.post"));
+    }
+
+    #[test]
+    fn prompt_forbids_the_csrf_bypass_and_shows_the_token_pattern() {
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(prompt.contains("Test.get(\"/tarea\").csrf()"));
+        assert!(prompt.contains("Never add `Config.get(\"test_mode\")`"));
+        assert!(!prompt.contains("gate it with `Config.get(\"test_mode\")`"));
     }
 
     #[test]

@@ -125,6 +125,11 @@ impl SessionManager {
         &self.dir
     }
 
+    /// The directory that holds archived sessions.
+    pub fn archive_dir(&self) -> &Path {
+        &self.archive
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -250,6 +255,31 @@ impl SessionManager {
                 .then_with(|| b.updated.cmp(&a.updated))
                 .then_with(|| b.id.cmp(&a.id))
         });
+        out
+    }
+
+    /// Every archived session, most recently active first. Used by the
+    /// friction log: publishing a draft archives its sessions, and the errors
+    /// that made the app better should not disappear with them.
+    pub async fn list_archived(&self) -> Vec<SessionInfo> {
+        let mut out = Vec::new();
+        let Ok(mut entries) = tokio::fs::read_dir(&self.archive).await else {
+            return out;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if validate_id(&name).is_err() {
+                continue;
+            }
+            let path = entry.path().join(LOG_FILE);
+            let store = SessionStore::new(path.clone());
+            let events = match store.read_all().await {
+                Ok(events) if !events.is_empty() => events,
+                _ => continue,
+            };
+            out.push(info_from(&name, path, &events));
+        }
+        out.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.id.cmp(&a.id)));
         out
     }
 
@@ -545,6 +575,11 @@ mod tests {
         let dest = manager.archive(&first.id).await.unwrap();
         assert!(dest.join(LOG_FILE).is_file());
         assert_eq!(manager.list().await.len(), 1);
+        // Archived sessions stay readable: the friction log needs them after a
+        // draft is published and its sessions are archived.
+        let archived = manager.list_archived().await;
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, first.id);
         // Archive never deletes.
         assert!(dest.exists());
         let _ = tokio::fs::remove_dir_all(&root).await;

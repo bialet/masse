@@ -74,6 +74,9 @@ embedded page's script (server).
 - The Bialet friction log is **derived**, never stored: `harness_session::friction`
   renders `.masse/friction.md` from `session.csv` on demand. Do not add an event
   type or an append-only side file for it; that would create a second truth.
+  The automatic report also reads `.masse/archive/` (publishing a draft
+  archives its sessions); the CLI keeps archived logs out unless
+  `--include-archived` is passed.
 - A `.wren` change is not done until syntax is checked and `bialet_test` is
   green. The agent loop nudges once for syntax (`VALIDATE_BEFORE_FINISH`) and
   once for the test run (`VERIFY_BEFORE_FINISH`) when the model tries to finish
