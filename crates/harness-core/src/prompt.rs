@@ -81,6 +81,9 @@ How to work:
     Let SQL produce dates (`date('now')`) or seed after boot.
   - Every file imports what it uses. A template that calls a domain helper
     needs its own `import "/_app/domain" for Periods`.
+  - A `Query` cannot be called inside `{{ }}` ("Query are not allowed inside
+    handlebars"): read it before the template (`var total = \`SELECT ...\`.toNum`)
+    and interpolate the plain value.
   - A list with a form per row: keep the whole `<li>` inside the `map` block
     and close it before the final `} }}`. "Expect end of HTML interpolation" or
     "Unclosed <li>" almost always means a tag was opened inside `{{ }}` and
