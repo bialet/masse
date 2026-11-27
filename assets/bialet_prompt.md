@@ -16,13 +16,18 @@ every page is at <https://bialet.dev/llms.txt>.
 
 > ⚠️ **CRITICAL: `Request.post(name)` returns `String | Null`.**
 > It returns `null` when the requested key is not present in the POST payload.
-> **NEVER assume the field exists. ALWAYS provide a default with `|| ""` or
-> check `if (value != null)` before any string operation.** Calling `.toString`,
-> `.count`, `.trim`, interpolation, or concatenation on a null value crashes at
-> runtime — this is the #1 production crash cause in Bialet apps.
+> **NEVER assume the field exists. Use the default overload
+> `Request.post("name", "")` when a fallback is wanted, or check
+> `if (value != null)` before any string operation.** The default replaces only
+> `null`, so a field submitted empty (`name=`) still comes back as `""` and a
+> blank submission is not silently turned into the fallback. Calling
+> `.toString`, `.count`, `.trim`, interpolation, or concatenation on a null
+> value crashes at runtime — this is the #1 production crash cause in Bialet
+> apps.
 >
 > *"Every code example using `Request.post()` **must** include a null-handling
-> strategy (`|| fallback` or `if (value != null)`) by default."*
+> strategy: the two-argument default where a fallback is wanted, or
+> `if (value != null)`."*
 
 > ⚠️ **CRITICAL: an inline HTML string may nest its own tag (Bialet 1.2.17+).**
 > `<div><div>...</div></div>` compiles — every tag can contain any other tag,
@@ -124,7 +129,7 @@ the upstream language). A few things you need to know to write correct code:
 var name = "Alice"
 var count = 42
 
-// Classes: construct, getters (no parens), setters, static methods
+// Classes: construct, getters (no parens), setters, zero-arg methods
 class User {
   construct new(data) {
     _name = data["name"]
@@ -134,8 +139,9 @@ class User {
   static count() { 0 }        // static method
 }
 
-// A method returns only through `return`. The single exception is a body
-// whose whole expression sits on the same line as its `{`.
+// A method returns only through `return`. The exception is a body whose
+// whole expression sits on the same line as its `{`, or a body that starts
+// with an HTML literal on the next line.
 class Math {
   static square(n) { n * n }          // returned: same line as the `{`
   static double(n) {
@@ -174,8 +180,12 @@ class Poll {
 // "a" < "b" raises "String does not implement '<(_)'."
 
 // `count`, `toString`, `keys` and `bytes` are getters; `trim`, `lower` and
-// `replace` are methods. `" x ".trim` fails with "String does not implement
-// 'trim'."; `" x ".trim()` works. There is no `String.fromBytes`: to build
+// `replace` are methods. A zero-argument method can also be called without
+// `()`: `" x ".trim` calls trim() because no getter `trim` exists. The same
+// class cannot declare a getter and a zero-argument method with the same name
+// (that is a compile error), and the fallback is one-way (`count()` does not
+// read the getter). `Klass.new` and `list.clear` therefore run without parens.
+// There is no `String.fromBytes`: to build
 // text from numbers use `String.fromCodePoint`, and read text as a String.
 ```
 
@@ -208,7 +218,9 @@ Blocks use curly braces and can appear anywhere a statement is allowed
 1. **Statement block** — a newline right after `{`. Contains a series of
    statements and, when used as a method/function body, automatically returns
    `null` after the block completes. Return a different value with an explicit
-   `return`:
+   `return`. The one exception is an HTML literal right after the newline:
+   HTML is never a statement, so that body is a single-expression block that
+   returns its value.
 
 ```wren
 {
@@ -218,8 +230,8 @@ Blocks use curly braces and can appear anywhere a statement is allowed
 ```
 
 2. **Single-expression block** — no newline after `{` (or after the parameter
-   list). It may contain only one expression and automatically returns its
-   result:
+   list), or a newline followed by an HTML literal. It may contain only one
+   expression and automatically returns its result:
 
 ```wren
 { "single expression" } // Exactly like:
@@ -254,18 +266,32 @@ var itemTotal = items.count       // list size
 if (name.count > 0 && items.count == 0) { ... }
 ```
 
-> **Pitfall:** `return <tag>` on the same physical line is a compile error
-> (`Expected expression` at `return`), regardless of what's inside the tag.
-> Always put the tag on the line after `return`:
+### Blank Checks: `isBlank` / `isFilled`
+
+Both are **getters** (no parentheses) and available on every object:
+
+```wren
+if (name.isBlank) { ... }        // null, "", "   ", empty list/map/range
+if (email.isFilled) { ... }      // the exact inverse
+```
+
+`isBlank` is the form-oriented check: `null`, a whitespace-only string and an
+empty sequence are blank. `false` and `0` are **values**, so they are not blank
+(`false.isBlank == false`). `isEmpty` remains the zero-elements check:
+`"   ".isEmpty` is `false` while `"   ".isBlank` is `true`.
+
+> **Pitfall:** `return` is a statement and does not belong inside a block
+> callback (`Expected expression` at `return`). Use the block's expression
+> without it:
 > ```wren
 > // WRONG
 > list.map { |x| return <div>{{ x }}</div> }
 > // CORRECT
-> list.map { |x|
->   return <div>{{ x }}</div>
-> }
+> list.map { |x| <div>{{ x }}</div> }
 > ```
-
+> `return <tag>` on one line is fine at the top level and inside a multi-line
+> method body. A newline ends the statement: `return` alone returns
+> immediately, and a tag on the next line is a separate expression.
 **Inline HTML strings** are Wren's template mechanism — no separate template
 language:
 
@@ -299,15 +325,18 @@ classes, attributes, or whole HTML blocks:
 ```
 
 **Iteration** uses `map`/`where`/etc. A block whose body is a single
-expression on the same line as `{` returns it implicitly:
+expression on the same line as `{` — or an HTML literal starting on the next
+line — returns it implicitly:
 
 ```wren
 {{ tasks.map{ |task| <li>{{ task.description }}</li> } }}
 ```
 
-> **Pitfall:** a multi-line block body is allowed but does **not**
+> **Pitfall:** a multi-line **code** block body is allowed but does **not**
 > implicitly return — without an explicit `return`, the block's value is
-> always `null` for every call, no error raised:
+> `null` for every call. Inside `{{ }}` the compiler now warns once per file;
+> `Fn.new`, Cron and migration bodies stay silent. An HTML literal body on the
+> next line is different: it is the block's value.
 > ```wren
 > // BUG: returns [] every time, "libre" is on its own line so it's discarded
 > list.where { |x|
@@ -353,7 +382,11 @@ this guide uses the **`_app/` folder**, which keeps the project root clean:
 ```
 my-app/
 ├── _app/                    # Protected folder (never served directly)
-│   ├── template.wren        # Site-wide layout (header, footer, nav)
+│   ├── template.wren        # Page shell: Layout.page(title, user, content)
+│   ├── components/          # Reusable markup, one class per file
+│   │   ├── cards.wren       # Cards.tool(item), Cards.mission(row)
+│   │   ├── hud.wren         # Hud.state(game)
+│   │   └── nav.wren         # Nav.bar(user)
 │   ├── migration.wren       # Database schema migrations
 │   ├── domain.wren          # Domain classes (models)
 │   └── cron.wren            # Scheduled tasks (optional)
@@ -373,10 +406,38 @@ my-app/
     └── style.css            # Static CSS files
 ```
 
+A route file is thin: read the input, call the domain, render a component. Markup
+that two routes share belongs in `_app/components/`, not in both files.
+
 > **Note:** Bialet also allows flat root-level files instead —
 > `_template.wren`, `_migration.wren`, `_domain.wren`, `_cron.wren`. Both
 > conventions work identically; pick one and stay consistent within a
 > project. This guide uses `_app/` throughout.
+
+### Structuring Larger Apps
+
+Split by concern, not by size:
+
+- **Route files are controllers.** One `.wren` file per URL: read input, call
+  the domain, `return` a component. If a route owns a `<li>` or a card that
+  another route also needs, that markup is in the wrong place.
+- **Components render.** One class per region of the page — `Layout` in
+  `template.wren`, `Nav`, `Hud` and `Cards` in `_app/components/`, one file
+  each. A component takes its data as parameters and returns an inline HTML
+  block.
+- **Domain classes decide.** Rules and derived values (`game.fuelLow`,
+  `Mission.upcoming(limit)`) live in `_app/domain.wren`. A page's query can run
+  in the route or behind a `static` domain method; it never runs inside a
+  component.
+- **Shared helpers:** presentation used by two components is a component
+  method; a rule used by two routes is a domain method; a permission check is a
+  small class such as `Auth` under `_app/`.
+- **Naming:** the class names the region (`Cards`), the method names the item
+  (`Cards.tool`, `Cards.mission`). Split a growing layout class into `Cards`,
+  `Hud`, `Nav` and `Layout` instead of adding methods to one god class.
+- **Repeated markup is app debt.** If the same card, status bar or navigation
+  appears in two pages, extract a method and call it from both — the framework
+  will not do it for you.
 
 ### What Bialet Does NOT Have
 
@@ -385,6 +446,8 @@ Bialet is intentionally simple. These concepts **do not exist**:
 - **No `main.wren` entry point** — each `.wren` file is executed based on the URL
 - **No `routes/` folder** — files ARE the routes (file-based routing)
 - **No middleware system** — put shared logic in `_app/` helper classes
+- **No component framework** — a component is a plain Wren class whose method
+  returns inline HTML. There is no registry, no props system and no JSX.
 - **No `validators/` folder** — validation goes in domain classes or inline
 - **No `static/` folder convention** — static files (css, js, images) go anywhere, as long as they don't start with `_` or `.`
 - **No `db/schema.sql`** — schema is defined in `_app/migration.wren`
@@ -440,10 +503,12 @@ if (!article) {
   return "<h1>Not found</h1>"
 }
 
-return Layout.render(<article>
-  <h1>{{ article["title"] }}</h1>
-  {{ article["body"] }}
-</article>)
+return Layout.page(article["title"], null,
+  <article>
+    <h1>{{ article["title"] }}</h1>
+    {{ article["body"] }}
+  </article>
+)
 ```
 
 One file serves every article — `/article?id=1`, `/article?id=2`, etc. — with
@@ -467,7 +532,8 @@ if (userId == null) {
 var user = User.find(userId)
 if (!user) {
   Response.status(404)
-  return Layout.render(<main><h1>User not found</h1></main>)
+  return Layout.page("Not found", null,
+    <p>User not found</p>)
 }
 ```
 
@@ -479,29 +545,26 @@ the folder; the deepest match wins.
 
 ## Views: Templates in `_app/template.wren`
 
+A layout is a component: a class with a method that returns the page shell and
+takes the body as a parameter.
+
 ```wren
 // _app/template.wren
-class Layout {
-  static render(content) { Layout.render(content, "My App") }
+import "/_app/components/nav" for Nav
 
-  static render(content, title) { <!doctype html>
+class Layout {
+  static page(title, user, content) { <!doctype html>
     <html lang="en">
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>{{ title }}</title>
+        <title>{{ title }} · My App</title>
       </head>
       <body>
-        <header>
-          <nav>
-            <ul><li><strong>My App</strong></li></ul>
-            <ul>
-              <li><a href="/">Home</a></li>
-              <li><a href="/about">About</a></li>
-            </ul>
-          </nav>
-        </header>
-        {{ content }}
+        {{ Nav.bar(user) }}
+        <main>
+          {{ content }}
+        </main>
         <footer>
           <small>&copy; My App</small>
         </footer>
@@ -514,16 +577,16 @@ class Layout {
 // index.wren
 import "_app/template" for Layout
 
-return Layout.render(
-  <main>
-    <h1>Welcome</h1>
-  </main>
+var user = `SELECT id, name FROM users WHERE id = ?`.first(Session.new().get("userId"))
+
+return Layout.page("Welcome", user,
+  <h1>Welcome</h1>
 )
 ```
 
 > **Pitfall:** if `Layout`'s methods are `static` (as above), call
-> `Layout.render(...)` directly. If you instead define instance methods, you
-> must instantiate first: `Layout.new().render(...)`.
+> `Layout.page(...)` directly. If you instead define instance methods, you
+> must instantiate first: `Layout.new().page(...)`.
 
 **Markup is not a string.** Write the tags raw inside the method body, as in the
 example: don't concatenate fragments (`"<div>" + value + "</div>"`) and don't
@@ -531,6 +594,83 @@ open a quoted string to hold markup for `{{ }}` (inside a string it renders
 literally, and a real newline there is a syntax error). Tags are balanced at
 compile time: a missing or an extra close tag is an error, and any tag may nest
 any other, including its own name.
+
+### Components
+
+A component is a class whose method returns an inline HTML block. There is no
+registry and no props object: pass the data as parameters and compose by calling
+one method from another inside `{{ }}`.
+
+```wren
+// _app/components/cards.wren
+class Cards {
+  static tool(item) { <article class="card tool">
+    <h3>{{ item["name"] }}</h3>
+    <p class="meta">Wear {{ item["wear"] }} of 100</p>
+  </article> }
+
+  static mission(row) { <li class="mission">
+    <a href="/mission?id={{ row["id"] }}">{{ row["title"] }}</a>
+    <span class="reward">{{ row["reward"] }} gold</span>
+  </li> }
+}
+```
+
+```wren
+// _app/components/hud.wren
+class Hud {
+  static state(game) { <aside class="hud">
+    <span>Day {{ game["day"] }}</span>
+    <span>Fuel {{ game["fuel"] }}</span>
+    <span>Credits {{ game["credits"] }}</span>
+  </aside> }
+}
+```
+
+```wren
+// _app/components/nav.wren
+class Nav {
+  static bar(user) { <nav>
+    <a href="/">Dashboard</a>
+    <a href="/missions">Missions</a>
+    {{ user && <span class="who">{{ user["name"] }}</span> }}
+  </nav> }
+}
+```
+
+```wren
+// dashboard.wren
+import "_app/template" for Layout
+import "_app/components/cards" for Cards
+import "_app/components/hud" for Hud
+
+var userId = Session.new().get("userId")
+var user = `SELECT id, name FROM users WHERE id = ?`.first(userId)
+if (!user) return Response.redirect("/login")
+
+var game = `SELECT day, fuel, credits FROM games WHERE user_id = ?`.first(userId)
+var tools = `SELECT id, name, wear FROM tools WHERE user_id = ?`.fetch(userId)
+
+return Layout.page("Dashboard", user,
+  <section class="dashboard">
+    {{ Hud.state(game) }}
+    <div class="grid">{{ tools.map { |t| Cards.tool(t) } }}</div>
+  </section>
+)
+```
+
+- **Pass data in.** A component takes a row, Map or string as a parameter. It
+  does not read `Request`, `Session` or the database: the route fetches and
+  decides, the component renders.
+- **Compose through `{{ }}`.** `{{ Nav.bar(user) }}` and
+  `{{ tools.map { |t| Cards.tool(t) } }}` are the whole composition mechanism.
+- **A component returns `HtmlNode`.** Its markup is inserted as-is; plain values
+  interpolated inside it are still escaped.
+- **Reuse, do not copy.** A card, status bar or nav rendered by two pages is one
+  method called twice. `Layout` is a component too.
+- **Start an HTML argument on a new line.** `Layout.page("X", null, <main>...)`
+  is a parse error: after a comma the lexer reads `<` as less-than. Put the
+  literal on the next line.
 
 ## Database
 
@@ -588,8 +728,8 @@ var age = Num.fromString(row["age"])              // manual conversion
 
 ```wren
 var allowedSorts = ["id", "name", "email", "createdAt"]
-var sortCol = Request.get("sort") || "id"
-var sortDir = Request.get("order") || "asc"
+var sortCol = Request.get("sort", "id")
+var sortDir = Request.get("order", "asc")
 
 var users = `SELECT * FROM users`
   .order(sortCol, sortDir, allowedSorts)
@@ -608,7 +748,7 @@ fragments. Write one static query and bypass each filter with `OR` instead:
 
 ```wren
 // Empty string bypasses the filter
-var search = Request.get("search") || ""
+var search = Request.get("search", "")
 var users = `SELECT * FROM users WHERE (? = '' OR name LIKE '%' || ? || '%')`.fetch(search, search)
 
 // Boolean flag bypasses the filter — tri-state "all/active/completed"
@@ -626,8 +766,8 @@ own bypass, to let callers omit any combination of them.
 Always pass `LIMIT`/`OFFSET` as `?` placeholders:
 
 ```wren
-var page = Num.fromString(Request.get("page") || "1")
-var limit = Num.fromString(Request.get("limit") || "20")
+var page = Num.fromString(Request.get("page", "1"))
+var limit = Num.fromString(Request.get("limit", "20"))
 var offset = (page - 1) * limit
 
 var total = `SELECT COUNT(*) FROM users`.toNum
@@ -671,13 +811,35 @@ Db.migrate("Seed sample posts", Fn.new{
   `posts`.save({"title": "First post", "content": "Hello world", "userId": 1})
   `posts`.save({"title": "Second post", "content": "More content", "userId": 1})
 })
+
+// Or pass a list: each item is exactly one statement (no `;` split)
+Db.migrate("Index posts", [
+  `CREATE INDEX posts_title ON posts (title)`,
+  `CREATE INDEX posts_user ON posts (userId)`
+])
 ```
 
+- Each call is **atomic**: the statements and the version row commit together,
+  so a failed migration leaves no partial schema. Need `VACUUM`,
+  `PRAGMA journal_mode` or a `PRAGMA foreign_keys = OFF` rebuild? Pass `false`
+  as the third argument (`Db.migrate(name, sql, false)`). The statements then
+  run without the wrapping transaction, and a failure leaves the earlier ones
+  applied with no version row.
+- A backtick migration is split only on statement-ending `;`: semicolons inside
+  quotes, comments and `CREATE TRIGGER ... BEGIN ...; ... END;` stay put.
+- The version row stores a SHA-256 of the SQL. Editing an applied migration
+  logs a warning and does not run the new SQL; write a new migration instead.
+  A `Fn` migration stores no hash, so editing a callback is not detected.
 - Runs on every app start and every file update.
 - The migration **name** is the dedup key — it only runs once. Use a
   descriptive name.
 - `_migration.wren` (root) and `_app/migration.wren` are equivalent — this
   guide uses the `_app/` form.
+- To edit a migration without applying it, serve with `--no-watch` (no
+  save-triggered run), check the file with `bialet -t _migration.wren` (it
+  compiles the Wren and parses every backtick query with SQLite, catching
+  syntax errors such as a duplicated `LIMIT` without running anything), then
+  restart the server without the flag to apply it.
 
 ### `BIALET_*` System Tables
 
@@ -736,27 +898,27 @@ to instances of a class whose `construct new(data)` accepts a Map.
 ## Dates
 
 ```wren
-var now = Date.new()                              // current UTC date/time
+var now = Date.new()                              // current date/time in Date.tz
 var d = Date.new(2024, 9, 13, 15, 45, 30)          // explicit fields
 var fromDb = Date.new(row["createdAt"])            // "YYYY-MM-DD[ HH:MM:SS]" string
+var instant = Date.new(1700000000, "UTC")          // epoch SECONDS + zone (like Date.fromUnix)
 
 d.year; d.month; d.day                             // singular
 d.hours; d.minutes; d.seconds                      // PLURAL -- d.hour raises an error
 d.unix                                              // Unix timestamp (seconds)
 d.format("#Y-#m-#d")                                // strftime-style tokens, # not %
-d1 < d2; d1 == d2; d1.diff(d2)                      // comparisons work; diff() is seconds
+d1 < d2; d1 == d2; d2 - d1; d1.diff(d2)             // comparisons; subtracting dates gives seconds
+d + 86400                                           // shift the instant by 86400 seconds
+d.addDays(30)                                       // calendar days: keeps the clock and zone
 ```
 
-> **CRITICAL:** `Date` has **no** `+`/`-` operators — `date + 86400` raises
-> `Date does not implement '+(_)'.`. There is also no way to build a `Date`
-> from a Unix timestamp number (`Date.new(1700000000)` raises
-> `Num does not implement 'split(_)'.`) — the constructor only accepts a
-> `"YYYY-MM-DD"` / `"YYYY-MM-DD HH:MM:SS"` string or another `Date`. To
-> compare two instants, use `.diff`/`.unix` (both plain numbers); to add or
-> subtract calendar days, do the arithmetic on `year`/`month`/`day`
-> yourself (see [Date and
-> Time](https://bialet.dev/_sources/datetime.md) for a verified algorithm) —
-> there is no shortcut for either.
+> **Note:** `Date.new(number)` reads **epoch seconds**, not a year, so
+> `Date.new(d.unix)` round-trips. `+`/`-` with a number shift **seconds**;
+> `d2 - d1` returns seconds (same as `.diff`); `d1 + d2` is refused because
+> adding two instants has no meaning. Use `addDays(n)` for calendar days
+> (leap-day, month-end and DST safe — `09:00` stays `09:00`). There is no
+> `addMonths` in core: clamp the day in a helper (see
+> [Recipes](https://bialet.dev/_sources/recipes.md)).
 
 ## Controllers: Logic at the Top, View at the Bottom
 
@@ -770,8 +932,8 @@ import "/_app/domain" for User
 // === CONTROLLER ===
 if (Request.isPost) {
   var user = User.new()
-  user.name = Request.post("name") || ""
-  user.email = Request.post("email") || ""
+  user.name = Request.post("name", "")
+  user.email = Request.post("email", "")
   user.save()
   return Response.redirect("/users")
 }
@@ -779,8 +941,8 @@ if (Request.isPost) {
 var users = User.all()
 
 // === VIEW ===
-return Layout.render(
-  <main>
+return Layout.page("Users", null,
+  <section>
     <h1>Users</h1>
     <table>
       <thead><tr><th>Name</th><th>Email</th></tr></thead>
@@ -793,7 +955,7 @@ return Layout.render(
       <input type="email" name="email" required />
       <button type="submit">Create User</button>
     </form>
-  </main>
+  </section>
 )
 ```
 
@@ -839,14 +1001,16 @@ if (account is Map == false) return account  // Auth.require() returned an error
 ## Request Handling
 
 ```wren
-// Query parameters
+// Query parameters — the second argument is the default for a missing one
 var id = Request.get("id")
-var page = Request.get("page") || "1"
+var page = Request.get("page", "1")
 Request.query("id")   // alias for Request.get("id")
+Request.query("id", "")   // alias with a default
 
-// POST form fields
+// POST form fields. The default applies only when the field is absent: a
+// field posted empty still returns "".
 if (Request.isPost) {
-  var name = Request.post("name") || ""
+  var name = Request.post("name", "")
 }
 
 // JSON body
@@ -857,13 +1021,22 @@ if (Request.isJson) {
 
 // Headers
 var apiKey = Request.header("X-Api-Key")
+var apiKeyOrEmpty = Request.header("X-Api-Key", "")   // default when absent
 
 // HTTP method
 Request.method     // "GET", "POST", "PUT", "DELETE", ...
 Request.isPost      // true for POST
 
+// Public URL (scheme + Host, or the BIALET_BASE_URL config override)
+Request.scheme              // "https" when TLS / X-Forwarded-Proto says so
+Request.host                // Host header, or "localhost"
+Request.baseUrl             // "https://app.example.com" (no trailing slash)
+Request.absoluteUrl("/x")   // "https://app.example.com/x"
+Request.fullUrl             // baseUrl + the requested path and query
+
 // Path segments (only inside a <folder>.wren route handler)
 var id = Request.route(0)
+var idOrDefault = Request.route(0, "index")   // default for a missing segment
 
 // Basic auth
 if (Request.login("admin", "secret") != false) return
@@ -873,7 +1046,14 @@ if (Request.login("admin", "secret") != false) return
 > **Pitfall:** `Request.get(name)` never reads the POST body, even when the
 > current request is a POST — it only ever reads the URL query string. If a
 > value needs to survive both a GET (rendering a form) and the POST that
-> submits it, read both explicitly: `Request.get("slug") || Request.post("slug")`.
+> submits it, read both explicitly:
+> `Request.get("slug", Request.post("slug", ""))`.
+>
+> **Pitfall:** `Request.host`/`baseUrl` come from the client's `Host` header
+> (Bialet ignores `X-Forwarded-Host`). Set
+> `Config.set("BIALET_BASE_URL", "https://app.example.com")` for canonical
+> links, emails and cron jobs; otherwise a proxy that forwards an arbitrary
+> `Host` lets the requester choose the domain in a generated link.
 >
 > **Pitfall:** on failed Basic auth, `Request.login` sets a `401` status and
 > the `WWW-Authenticate` header but does **not** stop the script by itself
@@ -915,8 +1095,8 @@ var session = Session.new()
 
 // Login
 if (Request.isPost) {
-  var user = `SELECT * FROM users WHERE email = ?`.first(Request.post("email") || "")
-  if (user && Util.verify(Request.post("password") || "", user["password"])) {
+  var user = `SELECT * FROM users WHERE email = ?`.first(Request.post("email", ""))
+  if (user && Util.verify(Request.post("password", ""), user["password"])) {
     Session.rotate()            // before any authenticated write
     session.set("userId", user["id"])
     return Response.redirect("/dashboard")
@@ -1203,11 +1383,11 @@ class Task {
 ```wren
 // _app/template.wren
 class Layout {
-  static render(content) { <!doctype html>
+  static page(title, content) { <!doctype html>
     <html lang="en">
       <head>
         <meta charset="utf-8" />
-        <title>Todo</title>
+        <title>{{ title }}</title>
       </head>
       <body>
         <main>{{ content }}</main>
@@ -1223,34 +1403,35 @@ import "_app/domain" for Task
 
 if (Request.isPost) {
   var task = Task.new()
-  task.description = Request.post("description") || ""
+  task.description = Request.post("description", "")
   task.save()
   return Response.redirect("/")
 }
 
 var tasks = Task.list()
 
-return Layout.render(<main>
-  <h1>Todo List</h1>
-  <form method="post">
-    <input name="description" placeholder="What needs to be done?" required />
-    <button type="submit">Add</button>
-  </form>
-  <ul>
-    {{ tasks.map{|task| <li>
-      <form method="post" action="/toggle" style="display:inline">
-        <input type="hidden" name="id" value="{{ task.id }}" />
-        <button>{{ task.finished ? "✓" : "○" }}</button>
-      </form>
-      <span class="{{ task.finished ? "done" : "" }}">{{ task.description }}</span>
-      <form method="post" action="/delete" style="display:inline">
-        <input type="hidden" name="id" value="{{ task.id }}" />
-        <button>✕</button>
-      </form>
-    </li>} }}
-  </ul>
-  {{ tasks.isEmpty && <p>No tasks yet. Add your first one above.</p> }}
-</main>)
+return Layout.page("Todo List",
+  <section>
+    <h1>Todo List</h1>
+    <form method="post">
+      <input name="description" placeholder="What needs to be done?" required />
+      <button type="submit">Add</button>
+    </form>
+    <ul>
+      {{ tasks.map{|task| <li>
+        <form method="post" action="/toggle" style="display:inline">
+          <input type="hidden" name="id" value="{{ task.id }}" />
+          <button>{{ task.finished ? "✓" : "○" }}</button>
+        </form>
+        <span class="{{ task.finished ? "done" : "" }}">{{ task.description }}</span>
+        <form method="post" action="/delete" style="display:inline">
+          <input type="hidden" name="id" value="{{ task.id }}" />
+          <button>✕</button>
+        </form>
+      </li>} }}
+    </ul>
+    {{ tasks.isEmpty && <p>No tasks yet. Add your first one above.</p> }}
+  </section>)
 ```
 
 ```wren
@@ -1266,7 +1447,7 @@ return Response.redirect("/")
 // delete.wren
 import "_app/domain" for Task
 
-Task.delete(Request.post("id") || "")
+Task.delete(Request.post("id", ""))
 return Response.redirect("/")
 ```
 
@@ -1280,15 +1461,30 @@ bialet -T            # the whole suite
 bialet -T -q         # quiet, CI-friendly
 ```
 
-The runner prepends its own prelude, which defines `Test` and `Tests`. Never
-import them, and never check a `_tests/*.wren` file with `bialet -t`: outside
-the runner the prelude does not exist, so the compiler reports
-`Test: Variable is used but not defined`. A test file is checked by running the
-suite.
+The runner prepends its own prelude, which defines `Test`, `Tests` and
+`Fixture`. Never import them, and do not check a `_tests/*.wren` file with
+`bialet -t`: outside the runner the prelude does not exist, so the compiler
+reports `Test: Variable is used but not defined`. The tree walk (`bialet check`)
+skips `_tests/` for that reason; a test file is checked by running the suite.
 
-`_tests/_init.wren`, when present, runs once before every test file: seed rows
-and set configuration there. Its variables are global to every test file, so
-give them unique names and do not collide with `UNIQUE` keys.
+Each test file is its own module: relative imports resolve from `_tests/`, and
+the variables `_init.wren` declares stay visible in the file.
+
+```wren
+// _tests/cards.wren
+import "../_app/components/cards" for Cards
+
+var html = Cards.tool({"name": "Hammer", "wear": "40"}).toString
+Test.assert(html.contains("Hammer"), "the card renders its name")
+```
+
+A component returns `HtmlNode`; call `.toString` before asserting on the markup.
+
+`_tests/_init.wren`, when present, runs before every test file, inside that
+file's database savepoint: seed rows and set configuration there, and keep its
+top-level `var` names unique. Each file starts from the migrated database plus
+what `_init.wren` seeds, and everything it writes is rolled back when the file
+ends — file order does not matter.
 
 ```wren
 // _tests/tasks.wren
@@ -1297,14 +1493,35 @@ Test.post("/", {"title": "Comprar pan"}).status(302)
 Test.get("/").contains("Comprar pan")
 ```
 
+`Fixture` builds a request without the router, for code that reads `Request` or
+`Session`. Call `apply()`, then assert on `status`, `body` or `headers`:
+
+```wren
+var fixture = Fixture.post("/tasks", {"title": "Buy bread"}).apply()
+
+Tasks.create()   // imported code reads Request.post(...)
+
+Test.assert(fixture.status == 302, "the POST redirects")
+Test.assert(fixture.header("location") == "/tasks", "it redirects to the list")
+```
+
+- **Stub outbound HTTP.** `Test.stubHttp(url, {...})` replaces the response for
+  a matching URL; stubs are process-wide, so routes see them. Read
+  `Test.httpCalls` and clear them with `Test.clearHttpStubs()`. An unmatched URL
+  hits the real network.
+- **Freeze time, seed randomness.** `Test.freezeTime(epoch)` (or a `Date`, or
+  `"YYYY-MM-DD HH:MM:SS"`), `Test.unfreezeTime()`, `Test.randomSeed(n)`,
+  `Test.randomSeed()`. Both reset before every file. `freezeTime` does not
+  affect SQLite `datetime('now')`.
 - Assert the flow the user asked for: a POST that writes, then a GET that reads
   the same value back. A page that renders is not a flow that works.
 - Add a boundary case (empty table, today against a future date, the first and
   last day of a month) instead of one mid-month date.
-- `Test.headers` does not exist: drop the header and assert the rest, or gate
-  the check on `Config.get("test_mode")` set in `_init.wren`.
-- Every file shares one temporary database per run: do not assume isolation,
-  and never weaken an assertion to make a red test go green.
+- `Test.headers` does not exist: drop the header and assert the rest. For a
+  CSRF-protected form, read the token with `var token = Test.get("/ruta").csrf()`
+  and send it in the POST (`"_bialet_csrf": token`); never add a
+  `Config.get("test_mode")` bypass to production code.
+- Never weaken an assertion to make a red test go green.
 - Keep the suite quiet: no `System.print` of whole tables and no leftover
   `debug*.wren` files.
 
@@ -1313,7 +1530,8 @@ Test.get("/").contains("Comprar pan")
 ```bash
 bialet              # runs the current directory on 127.0.0.1:7001
 bialet -p 7001 .    # explicit port and directory
-bialet -t index.wren              # validate a standalone file's syntax
+bialet --no-watch . # no file watcher: no live reload, no migration-on-save
+bialet -t index.wren              # validate syntax and backtick SQL, run nothing
 bialet -t app/main.wren /my/app   # validate with app context (for _app/ imports)
 bialet -T                         # run the test suite in _tests/
 ```
@@ -1321,7 +1539,8 @@ bialet -T                         # run the test suite in _tests/
 ## Summary
 
 1. **Code Style**: 2-space indentation, single-line methods when possible
-2. **Structure**: `_app/` folder for template, migrations, and domain classes
+2. **Structure**: `_app/` folder for the template, components, migrations and
+   domain classes; route files stay thin
 3. **No extra folders**: no `routes/`, `validators/`, `middleware/`, `static/`
 4. **Routing**: query parameters by default (`Request.get`); `<folder>.wren` +
    `Request.route(n)` only for path-based URLs, as an exception
@@ -1339,5 +1558,6 @@ bialet -T                         # run the test suite in _tests/
     CSS file (or a classless framework such as µCSS or Beak CSS) only when the
     page needs presentation
 13. **Tests**: `_tests/` with the fluent `Test.get/post` API, run with
-    `bialet -T`; `Test` comes from the runner, so never import it or validate a
-    test file with `bialet -t`
+    `bialet -T`; each file is its own module with its own database savepoint,
+    and `Test`, `Tests` and `Fixture` come from the runner, so never import
+    them or validate a test file with `bialet -t`

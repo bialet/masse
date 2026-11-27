@@ -20,10 +20,10 @@ bialet dev
 ```
 
 Starts the server from the current directory, enables live reload and the
-in-browser error display, and opens the server URL in your browser. The flags
-are stored in the database and persist across restarts, so you only need to
-run `dev` once. Plain `bialet` starts the server without touching those flags
-or opening the browser.
+in-browser error display, and opens the server URL in your browser. Both are
+on for that run only: nothing is written to the database, so a plain `bialet`
+start afterwards (or on a copy of the database) has neither. Plain `bialet`
+does not open the browser.
 
 > On Windows, double-clicking `bialet.exe` in File Explorer counts as a dev
 > launch: the server starts in dev mode with the browser opening automatically.
@@ -54,35 +54,83 @@ bialet --port=8080 /path/to/app
 | `-h`, `--host`          | Host name                                                                   | `127.0.0.1`                                  |
 | `-H`, `--help`          | Show this help and exit                                                     | None                                         |
 | `-r`, `--run`           | Run the code passed as argument, then exit                                  | None                                         |
-| `-t`, `--validate`      | Validate the syntax of a Wren file, then exit                               | None                                         |
+| `-t`, `--validate`      | Compile a Wren file, or every `.wren` file under a directory, and their local imports; parse their backtick SQL without executing anything, then exit | None                                        |
 | `-T`, `--tests`         | Run tests in the `_tests/` folder                                           | None                                         |
 | `-v`, `--version`       | Print the version and exit                                                  | None                                         |
 | `-l`, `--log`           | Log file location                                                           | `stdout`                                     |
 | `-d`, `--db`            | SQLite database file location                                               | `_db.sqlite3`                                |
 | `-w`, `--wal`           | Enable SQLite [Write-Ahead logging mode](https://www.sqlite.org/wal.html)   | Disabled                                     |
-| `-i`, `--ignore`        | Ignored files: comma-separated list of glob expressions                     | `README*,AGENTS*,LICENSE*,*.json,*.yml,*.yaml` |
+| `-i`, `--ignore`        | Ignored files: comma-separated globs; replaces the default list             | `README*,AGENTS*,LICENSE*,*.json,*.yml,*.yaml,*.exe` |
 | `-m`, `--mem-soft`      | Memory soft limit (MB)                                                      | `128`                                        |
 | `-M`, `--mem-hard`      | Memory hard limit (MB)                                                      | `256`                                        |
-| `-c`, `--cpu-soft`      | CPU soft limit (%)                                                          | `15`                                         |
-| `-C`, `--cpu-hard`      | CPU hard limit (%)                                                          | `30`                                         |
+| `-c`, `--cpu-soft`      | CPU time soft limit (seconds)                                               | `3600`                                       |
+| `-C`, `--cpu-hard`      | CPU time hard limit (seconds)                                               | `7200`                                       |
 | `-b`, `--max-post`      | Max request body (KB)                                                       | `128`                                        |
 | `-u`, `--max-upload-size` | Max per-file upload (bytes; `K`/`M`/`G` suffix scales it, e.g. `4MB`)     | `4 MB` (see note below)                      |
 | `-f`, `--foreign-keys`  | SQLite foreign keys: `on` or `off`                                          | `on`                                         |
 | `-s`, `--synchronous`   | SQLite synchronous: `off`, `normal`, `full`, or `extra`                     | `normal`                                     |
 | `-k`, `--secret-key-file` | AES-256 key for `Config.encrypt` / `Config.decrypt`: 64 hex chars or a passphrase, outside the app root | None |
-| `-q`, `--quiet`         | Quiet: suppress the browser auto-open and colored output                    | Disabled                                     |
+| `-q`, `--quiet`         | Quiet: no browser auto-open, no colored output; with `-T`, no migration or log output | Disabled                            |
+| `-W`, `--no-watch`      | Disable file watching: no live reload, and migrations/cron are not re-run when their file is saved | Disabled (watcher on) |
 
 Long options that require a value reject an empty one (`--port` alone is an
 error). Unknown options, short or long, are rejected with an error and the
 usage text instead of being silently ignored.
 
+> ⚠️ Pitfall: bialet refuses to start when the port already has a listener, even
+> when the addresses differ (`127.0.0.1` vs `0.0.0.0`). The kernel would accept
+> that second bind — `SO_REUSEADDR` allows a wildcard bind to share a port with a
+> specific address — and then route loopback traffic to the older server, so the
+> new one would never answer on `127.0.0.1`. Stop the other process
+> (`lsof -nP -iTCP:7001 -sTCP:LISTEN`) or pick another port.
+
 > ⚠️ Pitfall: `-d` and `-l` may point inside the app root only under a private
 > name (starting with `_` or `.`, like `_db.sqlite3`). Everything else below the
 > root is served, so a database or a log file with a public name there is
 > downloadable by any client. Bialet refuses to start and exits with status 11.
+> The public `.well-known/` directory counts as public here too.
+
+> ⚠️ Pitfall: the `-l` file records request targets, query strings included,
+> so Bialet creates it readable by its owner only (`0600`). An existing file
+> keeps its mode; do not make it group- or world-readable.
+
+> ⚠️ Pitfall: the `-l` file is only ever appended to. Every served request adds
+> exactly one line, written after the response:
+>
+> ```text
+> 2026-11-23 13:20:01 Request GET /search?q=logs status=200 bytes=4821 duration_ms=7
+> 2026-11-23 13:20:02 Request GET /missing status=404 bytes=714 duration_ms=1
+> ```
+>
+> The fields after the method and target are `status=`, `bytes=` and
+> `duration_ms=`. `bytes` counts response body bytes actually written, never
+> headers, so a `HEAD` (or a `204`/`304`) logs `0`; a send that fails partway
+> reports the bytes completed before the failure. `duration_ms` runs from accept
+> to the final write and is never negative. The target keeps its query string,
+> has control bytes escaped, and is cut after 512 bytes with `...`; request
+> bodies are never logged. Local `/_health` and live-reload polls are not
+> logged. Rotate the file with the system's tools, e.g. logrotate with
+> `copytruncate` (Bialet keeps the file open in append mode, so truncating it in
+> place is safe). Under systemd or Docker, logging to stdout and letting
+> journald or the log driver cap the size works too.
 
 Size values for `-u` are bytes; a `K`, `M`, or `G` suffix (KiB/MiB/GiB) scales
 them. `-u 4MB`, `-u 4096KB`, and `-u 4194304` are the same limit.
+
+`-m` and `-M` set the address-space limit (`RLIMIT_AS`) of the HTTP process on
+Linux. A soft limit above the hard one is lowered to it, a hard limit above the
+one the process inherited (systemd `LimitAS=`, `ulimit -v`) is lowered to that,
+and `0` means no limit of its own. macOS and Windows do not enforce them: there
+the values only size the request-body cap below.
+
+`-c` and `-C` are **seconds of CPU time** for the HTTP process, not a
+percentage. The supervisor runs the server as a parent/child pair: reaching the
+soft limit sends `SIGXCPU`, reaching the hard limit sends `SIGKILL`, and in
+either case the parent starts a fresh child, which drops the compiled-bytecode
+cache and every open connection. The defaults (one and two hours) are sized so
+that only a runaway process hits them; lower them only to bound a specific
+workload. `0` means no limit, with the shell's own `ulimit -t` still applying
+as the ceiling.
 
 > The upload cap is also bounded by the request-body limit (`-b`). A file must
 > fit inside a multipart body smaller than `-b` (default 128 KB), so the
@@ -108,6 +156,36 @@ Useful in scripts, containers, and CI:
 bialet -q /path/to/app
 ```
 
+In server mode that is all it does: log lines still print, just without color.
+Combined with the test runner, `bialet -T -q` goes further and silences the
+run's log: the migrations and the tests' `System.print`/`System.log` output.
+What remains is the one-line summary plus a `### FAIL` block per failure. A
+migration that fails to compile or apply is replayed to stderr and makes the
+run exit non-zero; notices emitted while Bialet is still starting can still
+appear, and with `-l FILE` the silenced records are not written to that file.
+See [Testing](tests.md).
+
+### Editing migrations without applying them
+
+A migration runs at startup and again whenever `_migration.wren` is saved. While
+you draft one, that save-triggered run applies half-written SQL to the
+database. Start the server with `--no-watch` to keep only the startup run:
+
+```bash
+bialet --no-watch /path/to/app
+```
+
+Edit and save the file freely, then check that it compiles without running it:
+
+```bash
+bialet -t _migration.wren
+```
+
+Restart the server without `--no-watch` to apply the new migration. The flag
+turns the whole file watcher off, so live reload is off for that run too. The
+server still runs migrations and installs cron once at startup, and prints a
+notice saying watching is disabled.
+
 ## Run Code from the Command Line
 
 Use `-r` to run Wren code once and exit:
@@ -129,6 +207,18 @@ The script runs without a request: `Request.method`, `Request.get(...)` and
 `Config` and `Session` work. Your app's own tables exist only if the database
 was already migrated (for example by starting the server or running `bialet -T`).
 
+Relative imports resolve against the app root, so a module next to your pages
+can be imported directly:
+
+```bash
+bialet -r 'import "lib" for X
+System.print(X.value)'
+```
+
+The import still goes through the module loader's containment check: a path that
+escapes the app root (`import "../outside"`) fails and exits non-zero. Wren uses
+newlines, not semicolons, so separate statements with a newline.
+
 ## Running Tests
 
 Bialet includes a built-in testing framework. See [Testing Guide](tests.md)
@@ -139,7 +229,7 @@ bialet -T                    # Run all tests in _tests/
 bialet -T docs/examples      # Run tests in a specific directory
 ```
 
-## Validate Syntax of a Wren File
+## Validate Syntax of a Wren File or Tree
 
 To check the syntax of a Wren file without executing it, use `-t`. Run it the
 same way you run the server:
@@ -149,22 +239,81 @@ If you start your server from the app directory:
 ```bash
 cd /path/to/app
 bialet               # starts server
-bialet -t index.wren # validates syntax
+bialet -t index.wren # compiles the file
 ```
 
 If you start your server with an explicit root path:
 
 ```bash
 bialet /path/to/app                         # starts server
-bialet -t /path/to/app/index.wren /path/to/app # validates syntax
+bialet -t /path/to/app/index.wren /path/to/app # compiles the file
 ```
 
 The root path is required when your file imports from `_app/` or uses relative
 imports. If you omit it for such files, the validator will exit with an error.
 
-This will validate the syntax and exit with code `0` if the syntax is valid, or
-code `1` if there are compilation errors. Useful for CI/CD pipelines and
-pre-commit hooks.
+### Check a whole app tree
+
+Pass a directory instead of a file to validate every `.wren` file below it:
+
+```bash
+bialet -t .
+bialet -t /path/to/app
+```
+
+`bialet check` is the same whole-tree mode with the app root as its default:
+
+```bash
+cd /path/to/app
+bialet check                 # every .wren file in the current tree
+bialet check /path/to/app    # every .wren file in another tree
+```
+
+A directory target is also the app root for that run, so `bialet -t /path/to/app`
+and `bialet check /path/to/app` work from any working directory without a second
+positional argument. Each file is compiled in its own VM, so imports shared by
+two pages do not collide.
+
+The walk includes private files and directories (`_app/`, `_migration.wren`,
+`_cron.wren`) because they are part of the app. It skips `_tests/` at any depth:
+those files only compile under `-T`, which loads the prelude that defines `Test`
+and `Tests`, so a tree check of a healthy suite would fail with "Variable is
+used but not defined". It also skips dot-directories (`.git`, `.venv`),
+symbolic links, and anything that is not a `.wren` file, so it cannot leave the
+tree or loop on a link. The check exits `0` only when every file compiles;
+failures name the file that failed.
+
+Only the directory walk skips `_tests/`. A file named explicitly is still
+checked: `bialet -t _tests/api.wren` reports the missing `Test`.
+
+> ⚠️ Pitfall: a directory check does not run migrations, so a migration that
+> depends on a table created earlier in the same file still passes. Like a
+> single-file check, it validates SQL syntax, not schema correctness.
+
+`-t` compiles the file and every local module it imports. It does not execute
+any of them, so runtime errors are not reported and migrations do not run:
+`bialet -t _migration.wren` leaves the database untouched even when the
+migration is valid. Remote imports (`http:`, `gh:`) are not fetched. A missing
+local import is not a syntax error; it only fails when the page runs.
+
+A syntax check parses backtick SQL against an **in-memory** SQLite database. It
+never opens, creates, or modifies the app's `_db.sqlite3` (or whatever `-d`
+names; `-d` is ignored in validation mode). That is what keeps `bialet check`
+safe on a read-only release and stops a tree-controlled `_db.sqlite3` symlink
+from redirecting the check to a database outside the tree.
+
+It also parses every backtick SQL literal it finds, including in imported
+modules, by asking SQLite to prepare it. Nothing is executed: a `CREATE TABLE`
+in a migration is parsed, not run, and no migration is recorded. Only syntax
+errors fail the check — a misspelled keyword, an unbalanced parenthesis, or a
+duplicated `LIMIT`. Errors that depend on the schema (a missing table, column,
+or function) are ignored, because a fresh database has none of the tables yet
+and a migration validates its `CREATE` before its `INSERT` has a table to
+target. SQL built at runtime with `String` formatting and SQL passed as a
+double-quoted string are not checked.
+
+This will exit with code `0` if the syntax is valid, or code `1` if there are
+compilation errors. Useful for CI/CD pipelines and pre-commit hooks.
 
 ```bash
 # Example: Check syntax before deploying (explicit root path)
@@ -175,6 +324,39 @@ else
     exit 1
 fi
 ```
+
+## Health Endpoint
+
+Bialet reserves `/_health` for supervisors and watchdogs:
+
+```bash
+curl -s http://127.0.0.1:7001/_health
+```
+
+```json
+{"status":"ok","version":"{{bialet_version}}","uptime_seconds":42,"database":"ok"}
+```
+
+The response is `200` when a trivial database query succeeds and `503` with
+`"database":"error"` when it does not. `uptime_seconds` counts from the start of
+the server process. Local health polls are not written to the `-l` file, so a
+one-second check does not fill it; a remote probe is still logged.
+
+`/_health` is answered **only to a direct loopback request** (`127.0.0.0/8`)
+whose `Host` is also local: `127.0.0.1`, `127.0.0.2` (any `127.0.0.0/8`
+literal), or `localhost`, optionally with a port. Every other caller gets the
+same `403` as any other `_`-prefixed path, so the endpoint does not advertise
+itself. This also stops a DNS-rebinding page from reading it through a browser
+on the same machine, where the peer is loopback but the `Host` is the attacker's
+name.
+
+Forwarding headers are deliberately not trusted either: a request that carries
+`X-Real-IP`, `Forwarded`, `Via`, or any `X-Forwarded-*` header is treated as
+proxied and refused, so a same-host proxy cannot accidentally publish the
+endpoint by forwarding every path. Do not route `/_health` to the internet;
+give a public liveness URL its own app route.
+
+`GET` and `HEAD` are accepted; any other method answers `405`.
 
 ## Upload and SQLite Tuning
 

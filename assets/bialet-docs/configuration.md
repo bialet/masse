@@ -45,15 +45,48 @@ if (Config.bool("live_reload")) {
 }
 ```
 
-Bialet reads a few flags itself at startup. `BIALET_LIVE_RELOAD` enables the
-live-reload script (see [Live Reload](live-reload.md)), and
-`BIALET_SHOW_ERRORS` shows compile/runtime errors in the browser instead of the
-generic 500 page (see [Error Pages](errors.md)).
+Bialet reads a few settings itself at startup. `BIALET_LIVE_RELOAD` enables the
+live-reload script (see [Live Reload](live-reload.md)), `BIALET_SHOW_ERRORS`
+shows compile/runtime errors in the browser instead of the generic 500 page (see
+[Error Pages](errors.md)), and `BIALET_TIMEZONE` sets the zone every `Date` uses
+by default (see [Date and time](datetime.md#application-timezone)):
 
-> ⚠️ Pitfall: these flags are read once, at startup. Changing them in the
+```wren
+Config.set("BIALET_TIMEZONE", "America/Bogota")
+```
+
+> ⚠️ Pitfall: these settings are read once, at startup. Changing them in the
 > database while a server is running (e.g. with `Config.enable()` from a
 > request handler) has no effect until you restart the server. `bialet dev`
-> sets both before the server starts, which is why it "just works".
+> turns live reload and error pages on for its own run without touching the
+> database.
+
+### Public base URL: `BIALET_BASE_URL`
+
+`Request.baseUrl` (and `absoluteUrl`/`fullUrl`) builds links from the request's
+scheme and `Host` header. Behind a proxy, or from cron and email code that has
+no request at all, set the public origin explicitly:
+
+```wren
+Config.set("BIALET_BASE_URL", "https://app.example.com")
+```
+
+The value is trimmed and trailing slashes are removed, so
+`"https://app.example.com/"` works. When the row is absent or empty, the request
+authority is used (`https://` when `X-Forwarded-Proto`/`Forwarded` reports
+TLS). Unlike the startup settings above, this is read on every call, so a change
+takes effect on the next request without a restart.
+
+```wren
+var canonical = Request.absoluteUrl("/articles/%(_id)")  // https://app.example.com/articles/42
+```
+
+> ⚠️ Pitfall: `Host` is client-controlled. Bialet never reads
+> `X-Forwarded-Host`, and a link built from `Host` can point at an attacker's
+> domain if the proxy forwards an arbitrary value. Set `BIALET_BASE_URL` for
+> canonical links and every email; use `Request.baseUrl` only for
+> proxy-controlled, single-origin apps.
+
 
 ### Development mode: `bialet dev`
 
@@ -65,14 +98,15 @@ bialet dev
 
 It starts the server from the current directory and:
 
-- Enables `BIALET_LIVE_RELOAD` and `BIALET_SHOW_ERRORS` in the database. This
-  is idempotent — run it once and the flags stay on for later `bialet` runs; if
-  they were disabled, `bialet dev` turns them back on.
+- Turns on live reload and error pages for that run only. Nothing is written to
+  the database, so a later plain `bialet` start on the same (or a copied)
+  `_db.sqlite3` serves no error traces and no `/_livereload` endpoint. To keep
+  either on outside dev mode, set the flag yourself (`Config.enable(...)`).
 - Opens `http://127.0.0.1:7001` (or your `-p` port) in the default browser,
   like `react-scripts start`.
 
-Plain `bialet` starts the server without touching the flags or opening the
-browser.
+Plain `bialet` starts the server with whatever the flags say in the database,
+and does not open the browser.
 
 `enable` sets the value to `"1"`, `disable` sets it to `"0"`. Both are
 equivalent to `Config.set("key", "1")` and `Config.set("key", "0")`.

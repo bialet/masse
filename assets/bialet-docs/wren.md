@@ -182,8 +182,16 @@ var s = "hello"
 var t = s + " world"   // "hello world"
 ```
 
-Strings are immutable. Index with `s[i]` to get a single-character string at
-byte offset `i`. `.count` is the byte length.
+Strings are immutable. `.count` is the number of **code points**, not bytes:
+`"Arpón".count` is `5`. Indexing, `indexOf`, and ranges use **byte offsets**, so
+`"Arpón"[0..4]` is not the whole string. `.bytes.count` gives the byte length
+(`"Arpón".bytes.count` is `6`), and `.codePoints` gives the code points.
+
+> ⚠️ Pitfall: mixing `.count` with byte offsets truncates accented text.
+> `line[0..line.count - 1]` drops the last byte of every multi-byte character.
+> Split on a delimiter (`line.split(":")`) instead of slicing by index, or use
+> `.codePoints` / `.bytes.count` when you really need character or byte
+> arithmetic.
 
 > ⚠️ Pitfall: strings don't implement `<`, `>`, `<=`, or `>=` —
 > `"a" < "b"` raises `String does not implement '<(_)'.`. Only `==` and
@@ -208,10 +216,13 @@ so missing data renders as empty output instead of crashing the request. On
 - `null.map { ... }` returns an empty list
 - `null.to(Class)` returns `null`
 - `null.toString` returns `""`
+- `null.toNum` returns `0`
+- `null.toBool` returns `false`
 
 Any other method call on `null` still throws — `Null does not implement 'x'.`
 For example `null.get("key")` is a runtime error. Use the safe methods above, or
-a `|| default` fallback, in templates.
+a `|| default` fallback, in templates. The default form is on `Map`:
+`map.get("key", fallback)`, not on a null value.
 
 ### Lists
 
@@ -228,7 +239,13 @@ list.count    // 5
 var map = { "name": "Alice", "age": "30" }
 map["name"]                     // "Alice"
 map.containsKey("email")        // false
+map.get("email")                // null
+map.get("email", "none")        // "none"
 ```
+
+`map.get(key)` is the same as `map[key]`; `map.get(key, default)` returns the
+default only when the key is missing, so a stored `null` still comes back as
+`null`.
 
 ### Ranges
 
@@ -389,6 +406,14 @@ d.name          // getter, returns "Rex"
 d.name = "Max"  // setter
 ```
 
+Bialet adds one rule for methods: `obj.name` falls back to calling a
+zero-argument method `name()` when the class has no getter `name`. So
+`" x ".trim` and `list.clear` work as well as their parenthesized forms.
+`obj.name()` always calls the method. A class cannot declare both a getter
+`name` and a zero-argument method `name()`: the compiler rejects the second
+declaration, because `obj.name` would be ambiguous. The fallback is one-way:
+`count()` does not read the `count` getter.
+
 ### Static Methods
 
 ```wren
@@ -459,17 +484,18 @@ Wren methods that express the logic directly.
 
 ### Same line vs. next line
 
-The implicit return only applies when the expression starts on the same line as
-the opening `{`. If the body starts on a following line, Wren treats it as a
-statement body — each statement runs, the last value is discarded, and the
-method returns `null`:
+The implicit return applies when the expression starts on the same line as the
+opening `{`, or when the body starts with an HTML literal on the next line:
+HTML is never a statement, so it is the body's value. Any other body that
+starts on a following line is a statement body — each statement runs, the last
+value is discarded, and the method returns `null`:
 
 ```wren
 class Shape {
   // Expression body — starts on the `{` line, the value is returned
   area(w, h) { w * h }
 
-  // Same for HTML — the string starts on the `{` line
+  // Same for HTML — may also start on the next line
   badge(label) { <span class="badge">{{ label }}</span> }
 
   // Expression moved to the next line — computes then discards, returns null
@@ -485,15 +511,16 @@ class Shape {
 ```
 
 `brokenArea(2, 3)` evaluates `2 * 3` and throws the result away, returning
-`null`. In a template this renders as empty output — no error tells you the
-value was dropped. Keep the expression on the same line as `{` when you want the
-implicit return, and use an explicit `return` for any multi-line method that
-must return a value.
+`null`. In a template this renders as empty output; a block doing the same
+inside `{{ }}` now warns at compile time, while a method body stays silent.
+Keep code on the same line as `{` when you want the implicit return, use an
+HTML body on the next line when the body is markup, and use an explicit
+`return` for any multi-line method that must return a value.
 
 > ⚠️ Pitfall: this rule applies to block arguments (`.map { }`, `.where { }`,
-> `Fn.new { }`, ...) exactly the same way, and it's easy to miss there
-> because there's no error — the block just silently returns `null` for
-> every call:
+> `Fn.new { }`, ...) exactly the same way, and it's easy to miss because the
+> block silently returns `null` for every call. Inside `{{ }}` the compiler
+> now warns once per file; `Fn.new`, Cron and migration bodies stay silent:
 > ```wren
 > // Bug: filters out everything. `libre` never gets returned because it's
 > // not on the same line as `{`, so the block's value is null every time.
@@ -511,7 +538,8 @@ must return a value.
 > }.toList  // -> the actual filtered list
 > ```
 > A single-expression block (`{ |x| x * 2 }`) is unaffected — implicit
-> return always works there since the expression is already on the `{` line.
+> return always works there, and equally when the body is an HTML literal on
+> the next line.
 
 ### When You Need `return`
 
@@ -611,7 +639,9 @@ items.contains("target")        // true/false
 ```wren
 [1, 2, 3].join(", ")           // "1, 2, 3"
 [1, 2, 3].count                // 3
-items.isEmpty                   // true/false
+items.isEmpty                   // true/false (zero elements)
+name.isBlank                    // true for null, "", "   " and empty sequences
+name.isFilled                   // the exact inverse of isBlank
 ```
 
 ### Paginate
@@ -640,7 +670,16 @@ Bialet adds a few convenience methods:
 "42".toNum                        // 42 (as Number)
 "1".toBool                        // true
 list.to(User)                     // map list of Maps into User instances
+value.isBlank                     // null, "", "   " and empty sequences
+value.isFilled                    // the exact inverse
 ```
+
+`isBlank` and `isFilled` are getters on every object and follow the form
+semantics: `null`, whitespace-only strings and empty sequences (list, map,
+range) are blank, while `false` and `0` are values and are not. `isEmpty` stays
+the zero-elements check: `"   ".isEmpty` is `false` but `"   ".isBlank` is
+`true`. Guard a missing `Request.post` result with `if (value.isBlank)` instead
+of `if (!value)` — the latter also matches `false` and misses `"   "`.
 
 The `.to(Class)` method on Sequence and Map is especially useful with database
 results:
@@ -676,6 +715,37 @@ import "gh:user/repo/module" for ClassName
 See [External Modules](external-modules.md) for details on external
 imports, and the [advanced routing guide](advanced-routing.md) for
 file-based module resolution.
+
+### The `random` module
+
+`random` is built into the binary. Import it explicitly:
+
+```wren
+import "random" for Random
+
+var rng = Random.new()          // seeded from the system
+var dice = rng.int(1, 7)        // 1 to 6
+var coin = rng.sample(["heads", "tails"])
+```
+
+`Random.new(seed)` takes a `Num` seed, or a sequence of up to 16 numbers, and is
+reproducible: the same seed and calls give the same values. Use it for tests,
+replays and seeded dice rolls. Methods:
+
+| Method | Result |
+|---|---|
+| `float()` | a number in `[0, 1)` |
+| `float(end)` | a number in `[0, end)` |
+| `float(start, end)` | a number in `[start, end)` |
+| `int()` | a non-negative whole number |
+| `int(end)` | a whole number in `[0, end)` |
+| `int(start, end)` | a whole number in `[start, end)` |
+| `sample(list)` | one random element |
+| `sample(list, count)` | `count` distinct random elements |
+| `shuffle(list)` | shuffles `list` in place |
+
+> ⚠️ Pitfall: `int(end)` excludes `end`. A six-sided die is
+> `rng.int(1, 7)`, not `rng.int(1, 6)`.
 
 ## Bialet vs. Standard Wren
 
@@ -746,7 +816,7 @@ Bialet adds these classes on top of standard Wren:
 | `Http`     | Outbound HTTP requests (GET/POST/PUT/DELETE) — see [HTTP Calls](http-calls.md)            |
 | `Date`     | Date and time with formatting, arithmetic, and timezones — see [Reference](reference.md)  |
 | `File`     | File uploads stored in SQLite — see [Reference](reference.md)                             |
-| `Markdown` | Render Markdown to HTML — see [Reference](reference.md)                                   |
+| `Markdown` | Render Markdown, list Markdown files and read front matter — see [Reference](reference.md) |
 | `Json`     | JSON parse and stringify — see [Reference](reference.md)                                  |
 | `Config`   | Key-value configuration store — see [Reference](reference.md)                             |
 | `Cron`     | Scheduled tasks — see [Reference](reference.md)                                           |

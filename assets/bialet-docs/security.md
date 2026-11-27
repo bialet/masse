@@ -21,6 +21,7 @@ Three rules cover most real-world damage:
 | CSRF tokens | `Session.csrf` / `Session.csrfOk` | Constant-time comparison |
 | HttpOnly + SameSite cookies | `Cookie.set` defaults | `Secure` added automatically behind TLS |
 | Private file blocking | Server | `_` and `.` prefixed files return 403 |
+| Loopback-only health | Server | `/_health` answers only to a `127.0.0.0/8` peer with a loopback `Host` |
 | Salted password hashes | `Util.hash` / `Util.verify` | Never store plaintext |
 | Constant-time compare | `Util.secureEquals` | Used by `csrfOk`, available to you |
 
@@ -93,16 +94,16 @@ var items = ["<b>a</b>", "b"]
 
 The built-in Markdown parser escapes HTML **only inside code blocks and inline
 code**. Raw HTML in paragraphs, headings, and lists passes through unescaped,
-and link/image URLs are not validated. Rendering untrusted input with
-`Markdown.html()` can therefore produce XSS:
+so rendering untrusted input with `Markdown.html()` can still produce XSS:
 
 ```wren
 // WRONG — raw HTML passes through to the output
 var content = Markdown.html("<script>alert('xss')</script>")
-
-// WRONG — javascript: links are not filtered
-var link = Markdown.html("[x](javascript:alert('xss'))")
 ```
+
+Link and image URLs are restricted to `http`, `https`, `mailto`, `tel`, `ftp`
+and relative references; a script-capable scheme such as
+`[x](javascript:alert(1))` is dropped and only the label is rendered.
 
 Render only Markdown you trust, or sanitize the output before serving it. See
 the [Markdown](markdown.md) guide for the full syntax and security notes.
@@ -412,6 +413,21 @@ direct HTTP access — the server returns 403. This is what protects
 `_app.wren`, `_migration.wren`, `_db.sqlite3`, and your configuration from
 being downloaded. Name anything private with a leading `_` or `.`.
 
+`/_health` is reserved for the server itself and is answered only to a direct
+loopback request whose `Host` is also a loopback name (`127.0.0.0/8` or
+`localhost`); everyone else gets the normal 403. The `Host` check blocks a
+DNS-rebinding page from reading the endpoint through a browser on the same
+machine. A request carrying `X-Real-IP`, `Forwarded`, `Via`, or any
+`X-Forwarded-*` header is treated as proxied and refused too, so a remote client
+cannot reach it by claiming to be local and a same-host proxy cannot publish it
+by accident. See [Health Endpoint](usage.md#health-endpoint).
+
+The `-i`/`--ignore` list is a **serving** policy, not a Wren read boundary: it
+does not apply to `Markdown.file()`, `Markdown.list()` or `Markdown.meta()`. A
+`README.md` or `AGENTS.md` is ignored over HTTP but can still be read from Wren,
+so keep secrets in a `_`/`.`-prefixed file and prefer an allow-list over a raw
+request value. See [Markdown](markdown.md).
+
 The single exception is the RFC 8615 `.well-known` namespace: a URL whose
 first segment is exactly `.well-known` is public, and everything below it is
 served like any other file. That is required by ACME/Let's Encrypt, OAuth 2.0
@@ -429,13 +445,14 @@ secrets under `.well-known` — it is world-readable by definition.
 
 ### Database File Permissions
 
-Bialet creates `_db.sqlite3` with SQLite's default mode, `0666 & ~umask`.
-Under the common `umask 022` that yields a world-readable `0644` file, so
-any local user on a shared host can read the whole database — uploaded
-files, password hashes, and cached remote modules included. The server does
-not tighten the mode after opening the file.
+On Linux and macOS Bialet creates a new `_db.sqlite3` with mode `0600`, so
+only the user running the server can read it; SQLite gives the `-wal` and
+`-shm` files the same mode. A database that already exists keeps its mode: one
+created by an older version under the common `umask 022` is a world-readable
+`0644` file, and any local user on a shared host can read the whole database —
+uploaded files, password hashes, and cached remote modules included.
 
-Run Bialet with a restrictive umask so the file is created `0600`:
+A restrictive umask also covers every other file the server creates:
 
 ```bash
 umask 0077
@@ -466,11 +483,15 @@ The server can enforce memory and CPU ceilings per app with CLI flags, which
 limits the blast radius of a runaway script or a memory-exhaustion attack:
 
 ```bash
-bialet -p 7001 -m 1024 -M 2048 -c 25 -C 50 /www/myapp
+bialet -p 7001 -m 1024 -M 2048 -c 600 -C 900 /www/myapp
 ```
 
-- `-m` / `-M` — soft / hard memory limit in MB
-- `-c` / `-C` — soft / hard CPU limit in percent
+- `-m` / `-M` — soft / hard memory limit in MB, enforced on **Linux only**
+  (`RLIMIT_AS` on the HTTP child). macOS and Windows builds run with no memory
+  ceiling; put a container or service-manager limit around them instead.
+- `-c` / `-C` — soft / hard CPU time limit in seconds: the soft one sends
+  `SIGXCPU`, the hard one `SIGKILL`, and the supervisor restarts the HTTP child
+  on either (which drops the bytecode cache). `0` disables the limit.
 - `-b` — max request body in KB (default 128 KB)
 
 Request bodies are rejected with `413 Payload Too Large` before parsing when
@@ -488,6 +509,18 @@ See the resource limits table in [Deployment](deployment.md) for defaults.
 - File uploads are stored inside the SQLite database, not on disk — they
   are never served from a writable directory. See the `File` class in the
   [Reference](reference.md).
+- Every response carries `X-Content-Type-Options: nosniff`. Responses rendered
+  by Wren also carry `Cache-Control: no-store`, so a shared cache cannot replay
+  one user's authenticated page to another. Call
+  `Response.header("Cache-Control", "public, max-age=60")` on a page that is
+  genuinely public and cacheable.
+- `Response.file` only serves script-free media types inline; an uploaded
+  `text/html` or `image/svg+xml` is downloaded as an attachment instead.
+- A request with two `Content-Length` headers, or with any
+  `Transfer-Encoding`, is refused with `400`: chunked bodies are not
+  implemented, and two lengths can be framed differently by a proxy.
+- A request target too long to resolve inside `PATH_SIZE` is refused with
+  `414` instead of being truncated to a different route.
 - Validate user input before trusting it: check types and ranges, convert
   with `Num.fromString()`, and reject values you did not expect. Do this in
   your domain classes before saving, and again in the form handler.

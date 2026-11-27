@@ -34,7 +34,10 @@ Additional methods available on Query objects:
 - `order(column, direction, allowedColumns, limit)`: Append a safe ORDER BY clause. See [Safe Sorting](#safe-sorting-with-order).
 - `to(Class)`: Map results to domain class instances. See [Mapping to Domain Classes](#mapping-results-to-domain-classes).
 
-The `first()`, `val`, `toNum`, and `toBool` methods automatically add a LIMIT clause.
+The `first()`, `val`, `toNum`, and `toBool` methods automatically add a
+`LIMIT 1` clause to a `SELECT` that does not already have one. Do not add your
+own `LIMIT` for them: an existing top-level `LIMIT` is detected and the query is
+left untouched, so `.first()` on `... LIMIT 1` is safe.
 
 You can't concatenate strings or use interpolations with the Query object. When
 you need to add parameters, use placeholders `?` and send the parameters to the
@@ -46,13 +49,13 @@ All methods receive the following parameters:
 - `(params)`: An array of parameters.
 - `(param1)`: Any non array parameter is converted to String.
 - `(param1, param2)`: Convert all parameters to String.
-- `(param1, param2, param3)`: Convert all parameters to String.
+- `(param1, ..., param7)`: Up to seven positional parameters.
+
+Methods accept at most **seven** positional parameters. More than seven must be
+passed as an array (`([param1, ..., param8])`).
 
 They can also be used as a property: `.query`, `.fetch`, `.first`, `.val` and
 `.toNum`.
-
-If you need more parameters, use the array syntax
-(`([param1, param2, param3, param4, param5, ...])`).
 
 ```wren
 // This will fail
@@ -410,7 +413,10 @@ The migration file can be in the root and be called `_migration.wren` or be
 inside the `_app` folder, `_app/migration.wren`.
 
 This script will be run every time the application starts and also when a Wren
-file is updated. For a complete migration example in the context of a REST API,
+file is updated. Start the server with `--no-watch` to stop the save-triggered
+run: migrations still run once at startup, but editing the file then needs a
+restart to apply. See [Editing migrations without applying them](usage.md#editing-migrations-without-applying-them).
+For a complete migration example in the context of a REST API,
 see the [Building REST APIs](rest-api.md) guide.
 
 ```wren
@@ -418,10 +424,122 @@ see the [Building REST APIs](rest-api.md) guide.
 Db.migrate("Name of the migration", `SOME QUERY`)
 ```
 
+Check a migration before it runs with `bialet -t _migration.wren`. It compiles
+the file and asks SQLite to parse every backtick literal without executing
+anything, so a duplicated `LIMIT` or another syntax error fails the check. It
+ignores missing table and column errors, so a `CREATE TABLE` followed by an
+`INSERT` still passes on a fresh database. While drafting a migration, serve
+with `--no-watch` to stop the save-triggered run, check the file with `-t`, then
+restart the server to apply it.
+
+Under `bialet -T`, the runner applies the migrations once before any test file,
+then runs each file inside a savepoint that is rolled back when the file
+finishes. Nothing a test writes survives the run, so a test is free to change
+rows. See [Testing in Bialet](tests.md#database-isolation).
+
+### Migration SQL Pitfall
+
+> ⚠️ Pitfall: the SQL argument must be a backtick query literal, not a
+> double-quoted string. A Wren double-quoted string cannot span lines, so a real
+> newline inside one fails with `Unterminated string.` — and it usually reports
+> a second `Expect ')' after arguments.` at the next line, because the call is
+> left incomplete.
+
+```wren
+// Wrong: a double-quoted Wren string is single-line.
+Db.migrate("init", "CREATE TABLE t (
+  id INTEGER
+)")
+```
+
+Use backticks, which keep the newlines:
+
+```wren
+// Correct: the backtick literal keeps the newlines.
+Db.migrate("init", `
+  CREATE TABLE t (
+    id INTEGER
+  )
+`)
+```
+
 The name of the migration is used to avoid repeating migrations. Use a
 descriptive name.
 
-You can have multiples queries separated by `;`.
+You can have multiples queries separated by `;`. The split honours SQL syntax:
+a `;` inside `'a;b'`, `"an;identifier"`, `[a;b]`, a `-- comment`, a
+`/* block comment */` or a `CREATE TRIGGER ... BEGIN ...; ... END;` body does
+not end a statement.
+
+### Atomic migrations
+
+Every `Db.migrate` call runs as one unit. The statements and the row in
+`BIALET_MIGRATIONS` commit together, so a migration that fails leaves nothing
+behind: no table, no half-copied column and no version row. Fix the SQL and
+restart; the migration runs again from the start.
+
+```wren
+Db.migrate("Add note", `
+  CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT);
+  INSERT INTO note (body) VALUES ('first');
+`)
+```
+
+Two workers starting at the same time serialize on the write lock, and the
+second one finds the version row and does nothing. Each call is atomic on its
+own, but the order in which two processes apply different migrations is not
+guaranteed, so start multiple workers one at a time.
+
+A migration that can only run outside a transaction takes `false` as the third
+argument:
+
+```wren
+Db.migrate("Reclaim space", `VACUUM`, false)
+Db.migrate("Rebuild note", `
+  PRAGMA foreign_keys = OFF;
+  CREATE TABLE note_new (id INTEGER PRIMARY KEY, body TEXT);
+  INSERT INTO note_new SELECT id, body FROM note;
+  DROP TABLE note;
+  ALTER TABLE note_new RENAME TO note;
+  PRAGMA foreign_keys = ON;
+`, false)
+```
+
+That is the whole escape hatch. `VACUUM`, a change of `PRAGMA journal_mode` and
+the `PRAGMA foreign_keys = OFF` table rebuild cannot run inside a transaction;
+SQLite either rejects them or, for the foreign-key pragma, silently ignores the
+change. With `false` the statements and the version row run one at a time, so a
+failure leaves the statements that already ran applied and no version row.
+Re-running after the fix repeats them. Accept that risk deliberately; prefer
+`true` (the default) for everything else.
+
+> ⚠️ Pitfall: a migration name is the dedup key, not a version you bump. Editing
+> an already-applied migration does not re-run it and does not undo it. Write a
+> new migration with a new name, or restore the backup.
+
+The version row also stores a SHA-256 hash of the migration SQL. Editing an
+applied migration logs:
+
+```
+Warning: migration 'Add note' changed after it was applied; the new SQL will not run.
+```
+
+The SQL does not run again — running an edited migration on a database that
+already holds the first version's effects is unsafe. The hash covers the SQL
+exactly as written, so whitespace and comment edits are detected too. A `Fn`
+callback has no SQL text and stores no hash, so editing a callback is not
+detected. Rows from older binaries have no hash; the next boot fills it in
+without a warning.
+
+A list applies each item as one statement, with no further split. Use it when a
+statement legitimately contains `;` or when you want the statements kept apart:
+
+```wren
+Db.migrate("Seed config", [
+  `INSERT INTO BIALET_CONFIG VALUES ('title', 'Bialet example page')`,
+  `INSERT INTO BIALET_CONFIG VALUES ('perPage', '10')`
+])
+```
 
 Use migration to insert non-transactional data. You can interact with the
 `BIALET_*` tables.
@@ -438,10 +556,17 @@ Bialet tables are prefixed with `BIALET_`.
 - `BIALET_MIGRATIONS`: The migration history table.
 - `BIALET_SESSION`: The session table.
 - `BIALET_FILES`: The file storage table.
-- `BIALET_LOGS`: The logging table.
+- `BIALET_LOGS`: The logging table. Each `System.print`/`System.log` line is
+  stored (cut at 4096 bytes); rows older than 30 days are pruned, and the table
+  keeps at most 100,000 rows.
 - `BIALET_REMOTE_MODULES`: The remote module cache table.
 
 If you delete or alter any of these tables your application will not work
 correctly.
+
+Every timestamp these tables store (`createdAt`, `updatedAt`) is UTC, and
+Bialet's retention compares against UTC. `BIALET_TIMEZONE` does not change that:
+it sets the zone of `Date`, the log line prefix and SQLite's `localtime`
+modifier. See [Stored timestamps](datetime.md#stored-timestamps).
 
 You may insert, update or delete rows, however do it with caution.
