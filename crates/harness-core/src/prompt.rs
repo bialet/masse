@@ -362,6 +362,20 @@ mod tests {
     }
 
     #[test]
+    fn prompt_forbids_a_query_inside_an_interpolation() {
+        let prompt = build_system_prompt(
+            &ProjectContext {
+                root: PathBuf::from("/tmp"),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(prompt.contains("Query are not allowed inside"));
+        assert!(prompt.contains("read it before the template"));
+        assert!(prompt.contains("interpolate the plain value"));
+    }
+
+    #[test]
     fn live_guide_takes_precedence() {
         let prompt = build_system_prompt(
             &ProjectContext {
